@@ -44,5 +44,53 @@ class TermParse:
             self.soup = BeautifulSoup(content, "lxml")
         return self.soup
 
+    async def parse_terms(self):
+        terms = []
+        term_ps = self.soup.find_all(attrs={"style": "margin:0;padding:0;"})
+        for p in enumerate(term_ps):
+            term = {
+                "term_name" : "",
+                "term_explanation" : ""
+            }
+            if p:
+                term["term_name"] = _txt(p)
+                explanation_p = p.find_next_sibling()
+                if explanation_p:
+                    term["term_explanation"] = _txt(explanation_p)
+            terms.append(term)
+    
+async def get_terms():
+    url = f"{Config.BASE_URL}/w/术语释义"
+    print(f"--- 开始爬取术语: {operator_name} ({url}) ---")
+    log_debug(f"开始爬取术语：{operator_name}，URL：{url}")
+    async with async_playwright() as p:
+        try:
+            # 启动浏览器（优化启动参数）
+            browser = await p.chromium.launch(
+                headless=Config.HEADLESS,
+                args=["--no-sandbox", "--disable-dev-shm-usage"]  # 适配Linux环境
+            )
+            page = await browser.new_page()
+            await page.goto(url, wait_until="domcontentloaded")
+            await page.wait_for_selector("#mw-content-text", timeout=Config.PAGE_LOAD_TIMEOUT)
+            log_debug(f"页面加载完成：{url}")
 
+            parser = TermParse(page)
+            terms = parser.parse_terms()
+            print(terms)
+        # # 精准捕获错误（优化错误日志）
+        # except PlaywrightTimeoutError:
+        #     log_debug(f"术语{term_name}提取超时")
+        #     print(f"❌ 术语{idx}/{total_terms}：失败（超时）→ 名称：{term_name}")
+        #     total_failed += 1
+        #     continue
+        except Exception as e:
+            log_debug(f"术语{terms}未知错误：{str(e)[:50]}")
+            print(f"❌ 术语{terms}：失败（未知错误）")
+    
+if __name__ == "__main__":
+    get_terms()
+
+
+    
         
