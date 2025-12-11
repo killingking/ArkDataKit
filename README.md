@@ -30,3 +30,11 @@ libpango-1.0-0 \
 libcairo2 \
 libasound2 \
 libatspi2.0-0
+
+# 生成 RSA 密钥对（默认路径：~/.ssh/id_rsa）
+
+ssh-keygen -t rsa
+
+# 替换为你的服务器信息（用户名 hjxfs）
+
+ssh-copy-id -p 22 hjxfs@120.79.255.61
