@@ -1,13 +1,17 @@
--- 先删除旧表（仅无数据时执行！有数据先备份）
+-- 先删除旧表（有数据先备份！备份命令：CREATE TABLE 表名_bak AS SELECT * FROM 表名;）
 DROP TABLE IF EXISTS skill_levels;
 DROP TABLE IF EXISTS operator_skills;
 DROP TABLE IF EXISTS talent_details;
 DROP TABLE IF EXISTS operator_talents;
 DROP TABLE IF EXISTS operator_extra_attrs;
 DROP TABLE IF EXISTS operator_attributes;
+DROP TABLE IF EXISTS operator_tags;
+DROP TABLE IF EXISTS tag_dict;
+DROP TABLE IF EXISTS operator_term_relations;
+DROP TABLE IF EXISTS terms;
 DROP TABLE IF EXISTS operators;
 
--- 重新创建数据库（确保字符集/排序规则正确）
+-- 重新创建数据库（确保字符集/排序规则统一）
 CREATE DATABASE IF NOT EXISTS arknights 
 DEFAULT CHARACTER SET utf8mb4 
 COLLATE utf8mb4_unicode_ci 
@@ -15,26 +19,40 @@ COMMENT '明日方舟干员数据仓库（ArkDataKit）';
 
 USE arknights;
 
--- 1. 干员核心基础信息表（补充所有缺失字段，修正类型）
+-- 1. 干员核心基础信息表（核心调整：职业分层 + 软删除 + 大职业索引）
 CREATE TABLE operators (
     id INT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID，自增',
-    name VARCHAR(100) NOT NULL UNIQUE COMMENT '干员名称（如：阿米娅、能天使）',
+    name VARCHAR(100) NOT NULL UNIQUE COMMENT '干员名称（如：焰影苇草、阿米娅）',
     rarity VARCHAR(10) NOT NULL COMMENT '稀有度（如：6★、5★）',
-    profession VARCHAR(50) NOT NULL COMMENT '职业（如：近卫、狙击）',
-    branch VARCHAR(50) NOT NULL COMMENT '职业分支（如：领主、速射手）',
+    profession VARCHAR(50) NOT NULL COMMENT '大职业（筛选用，如：医疗、近卫、狙击、术师）',
+    branch VARCHAR(50) COMMENT '子职业/分支（详情用，如：咒愈师、驭械术师、速射手）',
     faction VARCHAR(100) COMMENT '所属阵营（如：罗德岛、格拉斯哥帮）',
     gender VARCHAR(10) COMMENT '性别（男/女/未知/女士）',
     position VARCHAR(20) COMMENT '位置（远程位/近战位）',
-    tags VARCHAR(200) COMMENT '标签（空格分隔，如：输出 控场）',
-    branch_name VARCHAR(100) COMMENT '职业分支名称（冗余补充，如：术师-中坚术师）',
-    branch_description TEXT COMMENT '职业分支描述（该分支的核心特性）',
-    trait_details TEXT COMMENT '干员特性详情（天赋外的核心被动）',
     is_deleted TINYINT(1) DEFAULT 0 COMMENT '软删除标记：0=未删除，1=已删除',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '数据创建时间',
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '数据更新时间'
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '数据更新时间',
+    INDEX idx_profession (profession) COMMENT '索引：加快按大职业筛选干员'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT '明日方舟干员核心基础信息表';
 
--- 2. 干员基础属性表（数值字段改INT，保留VARCHAR兼容特殊值）
+-- 2. 干员固定标签字典表（方案2核心：存储官方枚举标签）
+CREATE TABLE tag_dict (
+    id INT PRIMARY KEY AUTO_INCREMENT COMMENT '标签ID',
+    tag_name VARCHAR(50) NOT NULL UNIQUE COMMENT '标签名称（官方固定枚举：治疗/支援/输出等）',
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT '干员标签字典表（存储所有官方定义的词缀标签）';
+
+-- 3. 干员-标签关联表（方案2核心：多对多关联）
+CREATE TABLE operator_tags (
+    id INT PRIMARY KEY AUTO_INCREMENT COMMENT '关联ID',
+    operator_id INT NOT NULL COMMENT '关联operators表的主键ID',
+    tag_id INT NOT NULL COMMENT '关联tag_dict表的主键ID',
+    FOREIGN KEY (operator_id) REFERENCES operators(id) ON DELETE CASCADE,
+    FOREIGN KEY (tag_id) REFERENCES tag_dict(id) ON DELETE CASCADE,
+    UNIQUE KEY uk_op_tag (operator_id, tag_id)  -- 避免同一干员重复关联同一标签
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT '干员-标签关联表（多对多）';
+
+-- 4. 干员基础属性表（无变更）
 CREATE TABLE operator_attributes (
     id INT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID，自增',
     operator_id INT NOT NULL COMMENT '关联operators表的主键ID',
@@ -47,11 +65,10 @@ CREATE TABLE operator_attributes (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (operator_id) REFERENCES operators(id) ON DELETE CASCADE,
-    -- 复合索引：按干员ID+精英等级查询（高频场景）
     INDEX idx_op_attr (operator_id, elite_level) COMMENT '索引：加快按干员+精英等级查询属性'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT '明日方舟干员基础属性表（删除干员时同步删除属性）';
 
--- 3. 干员额外属性表（修正拼写错误，补充默认值）
+-- 5. 干员额外属性表（无变更）
 CREATE TABLE operator_extra_attrs (
     id INT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID，自增',
     operator_id INT NOT NULL COMMENT '关联operators表的主键ID',
@@ -67,7 +84,7 @@ CREATE TABLE operator_extra_attrs (
     INDEX idx_operator_extra (operator_id) COMMENT '索引：加快按干员ID查询部署/阵营等额外属性'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT '明日方舟干员额外属性表（删除干员时同步删除属性）';
 
--- 4. 干员天赋基础表（补充默认值）
+-- 6. 干员天赋基础表（无变更）
 CREATE TABLE operator_talents (
     id INT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID，自增',
     operator_id INT NOT NULL COMMENT '关联operators表的主键ID',
@@ -78,11 +95,10 @@ CREATE TABLE operator_talents (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (operator_id) REFERENCES operators(id) ON DELETE CASCADE,
-    -- 复合索引：按干员ID+天赋类型查询
     INDEX idx_op_talent (operator_id, talent_type) COMMENT '索引：加快按干员+天赋类型查询天赋'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT '明日方舟干员天赋基础信息表';
 
--- 5. 天赋详情表（无变更，补充软删除）
+-- 7. 天赋详情表（无变更）
 CREATE TABLE talent_details (
     id INT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID，自增',
     talent_id INT NOT NULL COMMENT '关联operator_talents表的主键ID',
@@ -96,7 +112,7 @@ CREATE TABLE talent_details (
     INDEX idx_talent_detail (talent_id) COMMENT '索引：加快按天赋ID查询触发条件/效果'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT '明日方舟干员天赋详情表';
 
--- 6. 干员技能基础表（补充默认值，复合索引）
+-- 8. 干员技能基础表（无变更）
 CREATE TABLE operator_skills (
     id INT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID，自增',
     operator_id INT NOT NULL COMMENT '关联operators表的主键ID',
@@ -109,11 +125,10 @@ CREATE TABLE operator_skills (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (operator_id) REFERENCES operators(id) ON DELETE CASCADE,
-    -- 复合索引：按干员ID+技能编号查询（高频场景）
     INDEX idx_op_skill (operator_id, skill_number) COMMENT '索引：加快按干员+技能编号查询技能'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT '明日方舟干员技能基础信息表';
 
--- 7. 技能等级表（补充默认值，复合索引）
+-- 9. 技能等级表（无变更）
 CREATE TABLE skill_levels (
     id INT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID，自增',
     skill_id INT NOT NULL COMMENT '关联operator_skills表的主键ID',
@@ -126,10 +141,10 @@ CREATE TABLE skill_levels (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (skill_id) REFERENCES operator_skills(id) ON DELETE CASCADE,
-    -- 复合索引：按技能ID+等级查询
     INDEX idx_skill_level (skill_id, level) COMMENT '索引：加快按技能+等级查询数值/效果'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT '明日方舟干员技能等级详情表';
 
+-- 10. PRTS术语基础表（无变更）
 CREATE TABLE IF NOT EXISTS terms (
     id INT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '术语主键ID，自增',
     term_name VARCHAR(100) NOT NULL COMMENT '术语名称（如：法术脆弱、物理易伤，全局唯一）',
@@ -140,20 +155,30 @@ CREATE TABLE IF NOT EXISTS terms (
     UNIQUE KEY uk_term_name (term_name) COMMENT '术语名全局唯一，避免重复',
     KEY idx_term_name (term_name) COMMENT '加快按术语名查询'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='明日方舟PRTS术语基础表';
+
+-- 11. 干员-术语关联表（优化约束）
 CREATE TABLE IF NOT EXISTS operator_term_relations (
     id INT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '关联记录主键ID，自增',
     operator_name VARCHAR(50) NOT NULL COMMENT '关联干员名称（对应operators表的name字段）',
     term_name VARCHAR(100) NOT NULL COMMENT '关联术语名称（对应terms表的term_name字段）',
     relation_type VARCHAR(20) NOT NULL COMMENT '术语出现的模块类型：trait=特性、talent=天赋、skill=技能',
-    relation_id INT UNSIGNED DEFAULT 0 COMMENT '模块ID：特性填0，天赋填天赋序号（1/2），技能填技能序号（1/2/3）',
+    relation_id INT UNSIGNED DEFAULT 0 COMMENT '模块ID：特性填0，天赋填1/2，技能填1/2/3',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '关联记录创建时间',
     PRIMARY KEY (id),
-    -- 唯一索引：避免同一干员-模块-术语重复存储（核心去重）
     UNIQUE KEY uk_otr_uniq (operator_name, term_name, relation_type, relation_id),
-    -- 外键约束：确保关联的干员/术语存在，删除时级联删除关联记录
     CONSTRAINT fk_otr_operator FOREIGN KEY (operator_name) REFERENCES operators (name) ON DELETE CASCADE,
     CONSTRAINT fk_otr_term FOREIGN KEY (term_name) REFERENCES terms (term_name) ON DELETE CASCADE,
-    -- 复合索引：优化「干员查术语」「术语查干员」高频场景
+    -- CHECK约束（MySQL8.0+支持）：限制relation_id的合法取值
+    CONSTRAINT chk_relation_id CHECK (
+        (relation_type = 'trait' AND relation_id = 0) OR
+        (relation_type = 'talent' AND relation_id IN (1, 2)) OR
+        (relation_type = 'skill' AND relation_id IN (1, 2, 3))
+    ),
     KEY idx_otr_operator (operator_name, relation_type),
     KEY idx_otr_term (term_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='干员-术语关联表（记录术语出现在干员的具体模块）';
+
+-- 初始化标签字典表（插入所有官方固定标签）
+INSERT INTO tag_dict (tag_name) VALUES 
+('治疗'),('支援'),('输出'),('群攻'),('减速'),('生存'),('防护'),('削弱'),('位移'),
+('控场'),('爆发'),('召唤'),('快速复活'),('费用回复'),('支援机械'),('元素'),('高空');
