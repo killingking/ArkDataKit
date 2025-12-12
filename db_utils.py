@@ -223,26 +223,25 @@ class DBHandler:
             return False
         finally:
             cursor.close()
-
+            
     def insert_global_terms(self, terms):
-        """插入全局术语（适配global_terms表）"""
+        """插入全局术语（修复参数不匹配问题）"""
         cursor = self.connection.cursor()
         try:
             sql = """
             INSERT INTO global_terms (
                 term_name, term_type, term_explanation
             ) VALUES (%s, %s, %s)
-            ON DUPLICATE KEY UPDATE term_explanation = %s, term_type = %s
+            ON DUPLICATE KEY UPDATE 
+                term_explanation = VALUES(term_explanation),  # 引用插入的字段值，无需额外参数
+                term_type = VALUES(term_type)
             """
             values_list = []
             for term in terms:
-                # 重复时更新解释和类型
                 values_list.append((
                     term["term_name"],
                     term.get("term_type", ""),
-                    term.get("term_explanation", ""),
-                    term.get("term_explanation", ""),
-                    term.get("term_type", "")
+                    term.get("term_explanation", "")
                 ))
             cursor.executemany(sql, values_list)
             self.connection.commit()
