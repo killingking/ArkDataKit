@@ -1,21 +1,12 @@
+# db_handler.py
 import mysql.connector
 from mysql.connector import Error
-from dotenv import load_dotenv
-import os
-from datetime import datetime
-
-load_dotenv()
+from config import DB_CONFIG
+from utils import logger
 
 class DBHandler:
     def __init__(self):
-        self.config = {
-            "host": os.getenv("DB_HOST"),
-            "port": int(os.getenv("DB_PORT", 3306)),
-            "user": os.getenv("DB_USER"),
-            "password": os.getenv("DB_PASSWORD"),
-            "database": os.getenv("DB_NAME", "arknights"),
-            "charset": "utf8mb4"
-        }
+        self.config = DB_CONFIG
         self.connection = None
 
     def connect(self):
@@ -23,17 +14,17 @@ class DBHandler:
         try:
             self.connection = mysql.connector.connect(**self.config)
             if self.connection.is_connected():
-                print("✅ 数据库连接成功（适配新表结构）")
+                logger.info("✅ 数据库连接成功（适配新表结构）")
                 return True
         except Error as e:
-            print(f"❌ 数据库连接失败: {str(e)}")
+            logger.error(f"❌ 数据库连接失败: {str(e)}")
         return False
 
     def close(self):
         """关闭数据库连接"""
         if self.connection and self.connection.is_connected():
             self.connection.close()
-            print("🔌 数据库连接已关闭")
+            logger.info("🔌 数据库连接已关闭")
 
     def insert_operator_base(self, base_info):
         """插入干员基础信息（适配operator_base表结构）"""
@@ -43,7 +34,7 @@ class DBHandler:
             cursor.execute("SELECT id FROM operator_base WHERE name_cn = %s", (base_info["name_cn"],))
             result = cursor.fetchone()
             if result:
-                print(f"⚠️ 干员 {base_info['name_cn']} 已存在，跳过基础信息插入")
+                logger.warning(f"⚠️ 干员 {base_info['name_cn']} 已存在，跳过基础信息插入")
                 return result[0]
 
             # 插入新干员（严格匹配operator_base字段）
@@ -74,17 +65,17 @@ class DBHandler:
             cursor.execute(sql, values)
             self.connection.commit()
             operator_id = cursor.lastrowid
-            print(f"✅ 插入干员基础信息: {base_info['name_cn']} (ID: {operator_id})")
+            logger.info(f"✅ 插入干员基础信息: {base_info['name_cn']} (ID: {operator_id})")
             return operator_id
         except Error as e:
             self.connection.rollback()
-            print(f"❌ 插入基础信息失败 {base_info['name_cn']}: {str(e)}")
+            logger.error(f"❌ 插入基础信息失败 {base_info['name_cn']}: {str(e)}")
             return None
         finally:
             cursor.close()
 
     def insert_operator_attr(self, name_cn, attr_list):
-        """插入干员属性（适配operator_attr表结构，按name_cn关联）"""
+        """插入干员属性（适配operator_attr表结构）"""
         cursor = self.connection.cursor()
         try:
             # 先删除旧数据（避免重复）
@@ -95,7 +86,7 @@ class DBHandler:
                 name_cn, attr_type, max_hp, atk, def, res
             ) VALUES (%s, %s, %s, %s, %s, %s)
             """
-            # 保留字符串格式，不强制转int（适配原设计的varchar字段）
+            # 保留字符串格式，不强制转int
             values_list = []
             for attr in attr_list:
                 values = (
@@ -110,11 +101,11 @@ class DBHandler:
             
             cursor.executemany(sql, values_list)
             self.connection.commit()
-            print(f"✅ 插入干员属性: {name_cn}（共{len(values_list)}条属性记录）")
+            logger.info(f"✅ 插入干员属性: {name_cn}（共{len(values_list)}条属性记录）")
             return True
         except Error as e:
             self.connection.rollback()
-            print(f"❌ 插入属性失败 {name_cn}: {str(e)}")
+            logger.error(f"❌ 插入属性失败 {name_cn}: {str(e)}")
             return False
         finally:
             cursor.close()
@@ -123,7 +114,7 @@ class DBHandler:
         """插入干员天赋（适配operator_talent + operator_talent_detail表）"""
         cursor = self.connection.cursor()
         try:
-            # 先删除旧数据（级联删除detail，也可手动删）
+            # 先删除旧数据
             cursor.execute("DELETE FROM operator_talent WHERE name_cn = %s", (name_cn,))
             cursor.execute("DELETE FROM operator_talent_detail WHERE talent_id IN (SELECT id FROM operator_talent WHERE name_cn = %s)", (name_cn,))
             
@@ -152,19 +143,20 @@ class DBHandler:
             """
             detail_values = []
             for talent_id, talent in talent_ids:
-                detail_values.append((
-                    talent_id,
-                    talent.get("trigger_condition", ""),
-                    talent.get("description", ""),
-                    talent.get("potential_enhancement", "")
-                ))
+                for detail in talent.get("details", []):
+                    detail_values.append((
+                        talent_id,
+                        detail.get("trigger_condition", ""),
+                        detail.get("description", ""),
+                        detail.get("potential_enhancement", "")
+                    ))
             cursor.executemany(detail_sql, detail_values)
             self.connection.commit()
-            print(f"✅ 插入干员天赋: {name_cn}（共{len(talents)}个天赋）")
+            logger.info(f"✅ 插入干员天赋: {name_cn}（共{len(talents)}个天赋）")
             return True
         except Error as e:
             self.connection.rollback()
-            print(f"❌ 插入天赋失败 {name_cn}: {str(e)}")
+            logger.error(f"❌ 插入天赋失败 {name_cn}: {str(e)}")
             return False
         finally:
             cursor.close()
@@ -204,28 +196,28 @@ class DBHandler:
             """
             level_values = []
             for skill_id, skill in skill_ids:
-                for level in skill.get("levels", []):
+                for level in skill.get("skill_levels", []):
                     level_values.append((
                         skill_id,
                         level.get("level", ""),
                         level.get("description", ""),
-                        level.get("initial_sp", ""),  # 保留字符串格式
+                        level.get("initial_sp", ""),
                         level.get("sp_cost", ""),
                         level.get("duration", "")
                     ))
             cursor.executemany(level_sql, level_values)
             self.connection.commit()
-            print(f"✅ 插入干员技能: {name_cn}（共{len(skills)}个技能）")
+            logger.info(f"✅ 插入干员技能: {name_cn}（共{len(skills)}个技能）")
             return True
         except Error as e:
             self.connection.rollback()
-            print(f"❌ 插入技能失败 {name_cn}: {str(e)}")
+            logger.error(f"❌ 插入技能失败 {name_cn}: {str(e)}")
             return False
         finally:
             cursor.close()
             
     def insert_global_terms(self, terms):
-        """插入全局术语（修复参数不匹配问题）"""
+        """插入全局术语"""
         cursor = self.connection.cursor()
         try:
             sql = """
@@ -233,7 +225,7 @@ class DBHandler:
                 term_name, term_type, term_explanation
             ) VALUES (%s, %s, %s)
             ON DUPLICATE KEY UPDATE 
-                term_explanation = VALUES(term_explanation),  # 引用插入的字段值，无需额外参数
+                term_explanation = VALUES(term_explanation),
                 term_type = VALUES(term_type)
             """
             values_list = []
@@ -245,17 +237,17 @@ class DBHandler:
                 ))
             cursor.executemany(sql, values_list)
             self.connection.commit()
-            print(f"✅ 插入/更新全局术语（共{len(terms)}条）")
+            logger.info(f"✅ 插入/更新全局术语（共{len(terms)}条）")
             return True
         except Error as e:
             self.connection.rollback()
-            print(f"❌ 插入术语失败: {str(e)}")
+            logger.error(f"❌ 插入术语失败: {str(e)}")
             return False
         finally:
             cursor.close()
 
     def insert_operator_term_relation(self, name_cn, term_relations):
-        """插入干员-术语关联（适配operator_term_relation表）"""
+        """插入干员-术语关联"""
         cursor = self.connection.cursor()
         try:
             # 先删除旧关联
@@ -276,16 +268,62 @@ class DBHandler:
                 ))
             cursor.executemany(sql, values_list)
             self.connection.commit()
-            print(f"✅ 插入干员术语关联: {name_cn}（共{len(term_relations)}条）")
+            logger.info(f"✅ 插入干员术语关联: {name_cn}（共{len(term_relations)}条）")
             return True
         except Error as e:
             self.connection.rollback()
-            print(f"❌ 插入术语关联失败 {name_cn}: {str(e)}")
+            logger.error(f"❌ 插入术语关联失败 {name_cn}: {str(e)}")
             return False
         finally:
             cursor.close()
 
-# ------------------------------ 调用示例 ------------------------------
+    def batch_insert_operator_base(self, ops_list: list[dict]):
+        """批量插入干员基础信息（从干员一览数据）"""
+        cursor = self.connection.cursor()
+        try:
+            # 批量插入SQL（ON DUPLICATE KEY UPDATE 避免重复）
+            sql = """
+            INSERT INTO operator_base (
+                name_cn, rarity, profession, sub_profession, faction,
+                gender, position, tags
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                rarity = VALUES(rarity),
+                profession = VALUES(profession),
+                sub_profession = VALUES(sub_profession),
+                faction = VALUES(faction),
+                gender = VALUES(gender),
+                position = VALUES(position),
+                tags = VALUES(tags)
+            """
+            # 构造批量插入的参数列表
+            values_list = []
+            for op in ops_list:
+                values_list.append((
+                    op.get("name_cn", ""),
+                    op.get("rarity", ""),
+                    op.get("profession", ""),
+                    op.get("sub_profession", ""),
+                    op.get("faction", ""),
+                    op.get("gender", ""),
+                    op.get("position", ""),
+                    op.get("tags", "")  # 保留原始逗号分隔的标签
+                ))
+            
+            # 执行批量插入
+            cursor.executemany(sql, values_list)
+            self.connection.commit()
+            
+            logger.info(f"✅ 批量插入/更新干员基础信息（共{len(ops_list)}条）")
+            return True
+        except Error as e:
+            self.connection.rollback()
+            logger.error(f"❌ 批量插入干员基础信息失败: {str(e)}")
+            return False
+        finally:
+            cursor.close()
+
+# 调用示例（可单独调试）
 if __name__ == "__main__":
     # 初始化DBHandler
     db = DBHandler()
@@ -335,9 +373,11 @@ if __name__ == "__main__":
                 "talent_type": "第一天赋",
                 "talent_name": "灼痕",
                 "remarks": "※触发本天赋的当次伤害可受到本天赋加成",
-                "trigger_condition": "精英1",
-                "description": "造成伤害时有30%概率对敌人施加灼痕效果",
-                "potential_enhancement": "概率提升至35%"
+                "details": [{
+                    "trigger_condition": "精英1",
+                    "description": "造成伤害时有30%概率对敌人施加灼痕效果",
+                    "potential_enhancement": "概率提升至35%"
+                }]
             }
         ]
         db.insert_operator_talent("焰影苇草", talents)
@@ -350,7 +390,7 @@ if __name__ == "__main__":
                 "skill_type": "自动回复|手动触发",
                 "unlock_condition": "精英1",
                 "remark": "",
-                "levels": [
+                "skill_levels": [
                     {
                         "level": "7",
                         "description": "攻击力 +34% ，攻击速度 +35",
