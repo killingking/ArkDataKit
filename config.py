@@ -60,5 +60,6 @@ DB_CONFIG = {
 }
 
 # ========== 输出配置 ==========
+#是支持相对路径的
 LOG_FILE = "./log/prts_parse_debug.log"
 JSON_OUTPUT_DIR = "./output"  # JSON输出目录
