@@ -245,6 +245,20 @@ class DBHandler:
             return False
         finally:
             cursor.close()
+            
+    def count_global_terms(self):
+        """统计全局术语数量"""
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute("SELECT COUNT(*) FROM global_terms")
+            result = cursor.fetchone()
+            return result[0]
+        except Error as e:
+            logger.error(f"❌ 统计全局术语数量失败: {str(e)}")
+            return 0
+        finally:
+            cursor.close()
+
 
     def insert_operator_term_relation(self, name_cn, term_relations):
         """插入干员-术语关联"""

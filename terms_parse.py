@@ -50,7 +50,7 @@ class TermStaticCrawler:
             
             # 取下一个p标签的解释（用统一文本处理函数）
             next_p = anchor_p.find_next_sibling("p")
-            explanation = clean_text(next_p, handle_br=True) if next_p else "无详细解释"
+            explanation = clean_text(next_p, handle_br=True) if next_p else ""
             # 剔除解释中重复的术语名
             if term_name in explanation:
                 explanation = explanation.replace(term_name, "").strip()
