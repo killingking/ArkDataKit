@@ -3,7 +3,7 @@
 autoOpen: false # 打开应用时是否自动开启所有下方apps的预览
 apps: # 支持配置多个应用
   - port: 3000 # 应用的端口
-    run: echo “请前往preview设置启动命令” # 应用的启动命令
+    run: echo “python main.py” # 应用的启动命令
     root: / # 应用的启动目录
     name: cloud-studio-app # 应用名称
     description: 我的Cloud Studio App。 # 应用描述
