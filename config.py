@@ -60,5 +60,5 @@ DB_CONFIG = {
 }
 
 # ========== 输出配置 ==========
-LOG_FILE = "prts_parse_debug.log"
+LOG_FILE = "./log/prts_parse_debug.log"
 JSON_OUTPUT_DIR = "./output"  # JSON输出目录
