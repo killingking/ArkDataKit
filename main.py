@@ -12,6 +12,7 @@ def sync_terms_to_db():
     # 统一类调用方式
     crawler = TermStaticCrawler()
     terms = crawler.run()
+    logger.log("info", f"terms: {terms}")
     db = DBHandler()
     if not terms or db.connect():
         logger.warning("⚠️ 无有效术语，跳过入库")
