@@ -88,14 +88,14 @@ async def sync_operator_detail_to_db(operator_name: str):
         # 整理入库数据
         base_info = {
             "name_cn": operator_data["operator_name"],
-            "rarity": "",  # 从干员一览补充（可结合operators_list_get的结果）
-            "profession": "",  # 从干员一览补充
+            # "rarity": "",  # 从干员一览补充（可结合operators_list_get的结果）
+            # "profession": "",  # 从干员一览补充
             "sub_profession": operator_data["characteristic"].get("branch_name", ""),
             "faction": operator_data["attributes"]["extra_attributes"].get("faction", ""),
             "hidden_faction": operator_data["attributes"]["extra_attributes"].get("hidden_faction", ""),
-            "gender": "",  # 从干员一览补充
-            "position": "",  # 从干员一览补充
-            "tags": "",  # 从干员一览补充
+            # "gender": "",  # 从干员一览补充
+            # "position": "",  # 从干员一览补充
+            # "tags": "",  # 从干员一览补充
             "branch_description": operator_data["characteristic"].get("branch_description", ""),
             "trait_details": operator_data["characteristic"].get("trait_details", ""),
             "redployment_time": operator_data["attributes"]["extra_attributes"].get("redployment_time", ""),
@@ -120,7 +120,7 @@ async def sync_operator_detail_to_db(operator_name: str):
             return
             
         # 插入基础信息
-        db.insert_operator_base(base_info)
+        db.update_operator_base(base_info)
         # 插入属性
         if attr_list:
             db.insert_operator_attr(operator_name, attr_list)
@@ -133,7 +133,7 @@ async def sync_operator_detail_to_db(operator_name: str):
         # 插入干员术语关联
         if "terms" in operator_data and operator_data["terms"]:
             term_relations = [
-                {"term_name": t.get("term_name", ""), "relation_module": "技能/天赋", "module_id": ""} 
+                {"term_name": t.get("term_name", ""), "relation_module": "", "module_id": ""} 
                 for t in operator_data["terms"] if t.get("term_name")
             ]
             if term_relations:
@@ -170,6 +170,27 @@ async def batch_sync_operators(operator_names: list[str]):
     
     logger.info(f"===== 批量同步完成，成功: {success_count}/{len(operator_names)} =====")
 
+def sync_operators_detail():
+    """同步干员一览→批量同步干员详情"""
+    logger.info("===== 开始同步干员详情 =====")
+    db = DBHandler()
+    try:          
+        if not db.connect():
+            logger.error("❌ 数据库连接失败，跳过入库")
+            return
+        operators = db.select_all_operators()
+        if not operators:
+            logger.warning("⚠️ 无有效干员一览数据，跳过入库")
+            return
+        names = [op["name_cn"] for op in operators]
+        # 批量同步干员详情
+        asyncio.run(batch_sync_operators(names))
+        
+    except Exception as e:
+        logger.error(f"❌ 干员详情同步过程中发生错误: {str(e)}")
+    finally:
+        db.close()
+
 if __name__ == "__main__":
     # 可选执行顺序（按需注释/取消注释）
     # 1. 同步干员一览（批量入库基础信息）
@@ -178,7 +199,7 @@ if __name__ == "__main__":
     # 2. 同步静态术语    # 2. 同步静态术语（先于干员详情同步）
     sync_terms_to_db()
 
-    
+    sync_operators_detail()
     # 3. 同步单个干员详情（补充属性/天赋/技能）
     # asyncio.run(sync_operator_detail_to_db("焰影苇草"))
     

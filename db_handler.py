@@ -65,7 +65,7 @@ class DBHandler:
                 base_info.get("profession", ""),
                 base_info.get("sub_profession", ""),
                 base_info.get("faction", ""),
-                base_info.get("hidden_faction", "无"),
+                base_info.get("hidden_faction", ""),
                 base_info.get("gender", ""),
                 base_info.get("position", ""),
                 " ".join(base_info.get("tags", [])) if isinstance(base_info.get("tags"), list) else base_info.get("tags", ""),
@@ -88,8 +88,68 @@ class DBHandler:
         finally:
             cursor.close()
 
+    def update_operator_base(self, base_info):
+        """干员基础信息补充"""
+        if not self.connection or not self.connection.is_connected():
+            logger.error("❌ 数据库未连接，无法更新干员基础信息")
+            return False
+            
+        cursor = self.connection.cursor()
+        try:
+            # 检查干员是否存在
+            cursor.execute("SELECT id FROM operator_base WHERE name_cn = %s", (base_info["name_cn"],))
+            result = cursor.fetchone()
+            if not result:
+                logger.warning(f"⚠️ 干员 {base_info['name_cn']} 不存在，无法更新")
+                return False
+                
+            sql = """
+            UPDATE operator_base 
+            SET 
+                sub_profession = %s,
+                branch_description = %s,
+                trait_details = %s,
+                redployment_time = %s,
+                initial_deployment_cost = %s,
+                block_count = %s,
+                attack_interval = %s
+            WHERE name_cn = %s
+            """
+            
+            # 准备参数（补充字段值 + 匹配的name_cn）
+            params = (
+                base_info.get("sub_profession", ""),  # 分支职业
+                base_info.get("branch_description", ""),  # 分支描述
+                base_info.get("trait_details", ""),  # 特性详情
+                base_info.get("redployment_time", ""),  # 再部署时间
+                base_info.get("initial_deployment_cost", ""),  # 初始部署费
+                base_info.get("block_count", ""),  # 阻挡数
+                base_info.get("attack_interval", ""),  # 攻击间隔
+                base_info["name_cn"]  # 匹配干员的唯一键
+            )
+            
+            cursor.execute(sql, params)
+            self.connection.commit()
+            logger.info(f"✅ 成功更新干员【{base_info['name_cn']}】的基础信息")
+            return True
+            
+        except Error as e:
+            self.connection.rollback()
+            logger.error(f"❌ 更新干员【{base_info['name_cn']}】失败：{str(e)}")
+            return False
+        finally:
+            cursor.close()
+
     def insert_operator_attr(self, name_cn, attr_list):
         """插入干员属性（适配operator_attr表结构）"""
+        if not self.connection or not self.connection.is_connected():
+            logger.error("❌ 数据库未连接，无法插入干员属性")
+            return False
+            
+        if not name_cn or not attr_list:
+            logger.warning("⚠️ 干员名称或属性列表为空，跳过插入")
+            return False
+            
         cursor = self.connection.cursor()
         try:
             # 先删除旧数据（避免重复）
@@ -126,6 +186,14 @@ class DBHandler:
 
     def insert_operator_talent(self, name_cn, talents):
         """插入干员天赋（适配operator_talent + operator_talent_detail表）"""
+        if not self.connection or not self.connection.is_connected():
+            logger.error("❌ 数据库未连接，无法插入干员天赋")
+            return False
+            
+        if not name_cn or not talents:
+            logger.warning("⚠️ 干员名称或天赋列表为空，跳过插入")
+            return False
+            
         cursor = self.connection.cursor()
         try:
             # 先删除旧数据
@@ -177,6 +245,14 @@ class DBHandler:
 
     def insert_operator_skill(self, name_cn, skills):
         """插入干员技能（适配operator_skill + operator_skill_level表）"""
+        if not self.connection or not self.connection.is_connected():
+            logger.error("❌ 数据库未连接，无法插入干员技能")
+            return False
+            
+        if not name_cn or not skills:
+            logger.warning("⚠️ 干员名称或技能列表为空，跳过插入")
+            return False
+            
         cursor = self.connection.cursor()
         try:
             # 先删除旧数据
@@ -232,6 +308,14 @@ class DBHandler:
             
     def insert_global_terms(self, terms):
         """插入全局术语"""
+        if not self.connection or not self.connection.is_connected():
+            logger.error("❌ 数据库未连接，无法插入全局术语")
+            return False
+            
+        if not terms:
+            logger.warning("⚠️ 术语列表为空，跳过插入")
+            return False
+            
         cursor = self.connection.cursor()
         try:
             sql = """
@@ -260,6 +344,10 @@ class DBHandler:
             
     def count_global_terms(self):
         """统计全局术语数量"""
+        if not self.connection or not self.connection.is_connected():
+            logger.error("❌ 数据库未连接，无法统计全局术语数量")
+            return 0
+            
         cursor = self.connection.cursor()
         try:
             cursor.execute("SELECT COUNT(*) FROM global_terms")
@@ -274,6 +362,14 @@ class DBHandler:
 
     def insert_operator_term_relation(self, name_cn, term_relations):
         """插入干员-术语关联"""
+        if not self.connection or not self.connection.is_connected():
+            logger.error("❌ 数据库未连接，无法插入干员术语关联")
+            return False
+            
+        if not name_cn or not term_relations:
+            logger.warning("⚠️ 干员名称或术语关联列表为空，跳过插入")
+            return False
+            
         cursor = self.connection.cursor()
         try:
             # 先删除旧关联
@@ -305,6 +401,14 @@ class DBHandler:
 
     def batch_insert_operator_base(self, ops_list: list[dict]):
         """批量插入干员基础信息（从干员一览数据）"""
+        if not self.connection or not self.connection.is_connected():
+            logger.error("❌ 数据库未连接，无法批量插入干员基础信息")
+            return False
+            
+        if not ops_list:
+            logger.warning("⚠️ 干员列表为空，跳过批量插入")
+            return False
+            
         cursor = self.connection.cursor()
         try:
             # 批量插入SQL（ON DUPLICATE KEY UPDATE 避免重复）
@@ -348,7 +452,23 @@ class DBHandler:
             return False
         finally:
             cursor.close()
-
+    
+    def select_all_operators(self):
+        """查询所有干员基础信息"""
+        if not self.connection or not self.connection.is_connected():
+            logger.error("❌ 数据库未连接，无法查询干员基础信息")
+            return None
+            
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute("SELECT * FROM operator_base")
+            result = cursor.fetchall()
+            return result
+        except Error as e:
+            logger.error(f"❌ 查询所有干员基础信息失败: {str(e)}")
+            return None
+        finally:
+            cursor.close()
 # 调用示例（可单独调试）
 if __name__ == "__main__":
     # 初始化DBHandler

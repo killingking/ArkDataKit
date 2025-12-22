@@ -81,13 +81,16 @@ class TermStaticCrawler:
             terms = self.parse(html)
             self.save(terms)
             
-            # 打印前5个示例（调试用）
-            if terms:
-                logger.info("\n=== 爬取结果示例 ===")
-                for idx, t in enumerate(terms[:5], 1):
-                    logger.info(f"{idx}. 名称：{t['term_name']}")
-                    logger.info(f"   解释：{t['term_explanation'][:50]}...")
-            else:
+            # # 打印前5个示例（调试用）
+            # if terms:
+            #     logger.info("\n=== 爬取结果示例 ===")
+            #     for idx, t in enumerate(terms[:5], 1):
+            #         logger.info(f"{idx}. 名称：{t['term_name']}")
+            #         logger.info(f"   解释：{t['term_explanation'][:50]}...")
+            # else:
+            #     logger.warning("⚠️  未提取到有效术语")
+
+            if not terms:
                 logger.warning("⚠️  未提取到有效术语")
             return terms
         except Exception as e:
