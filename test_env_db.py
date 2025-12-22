@@ -1,13 +1,11 @@
 # test_env_db.py（放在ArkDataKit目录）
 import os
-from dotenv import load_dotenv
 import mysql.connector
 from mysql.connector import Error
 
 # 1. 强制加载.env（绝对路径）
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(PROJECT_ROOT, ".env")
-load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 # 2. 读取配置并打印
 config = {
