@@ -53,7 +53,10 @@ def sync_operator_list_to_db():
         if not db.connect():
             logger.error("❌ 数据库连接失败，跳过入库")
             return
-            
+
+        if db.count_operators_base() >= len(ops_list):
+            logger.warning("⚠️ 无新增干员，跳过入库")
+            return
         db.batch_insert_operator_base(ops_list)
         logger.info(f"✅ 成功入库 {len(ops_list)} 条干员基础信息")
         
@@ -170,7 +173,7 @@ async def batch_sync_operators(operator_names: list[str]):
 if __name__ == "__main__":
     # 可选执行顺序（按需注释/取消注释）
     # 1. 同步干员一览（批量入库基础信息）
-    # sync_operator_list_to_db()
+    sync_operator_list_to_db()
     
     # 2. 同步静态术语    # 2. 同步静态术语（先于干员详情同步）
     sync_terms_to_db()
