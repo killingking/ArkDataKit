@@ -504,7 +504,7 @@ class OperatorDetailParser:
             # 执行解析
             result = await self.parse_all()
             # 保存结果
-            await self.save(result)
+            # await self.save(result)
 
             # 打印调试信息
             logger.info("\n=== 解析结果汇总 ===")
