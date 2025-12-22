@@ -2,6 +2,11 @@
 import os
 from datetime import timedelta
 
+# 强制加载.env（绝对路径）
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+ENV_PATH = os.path.join(PROJECT_ROOT, ".env")
+load_dotenv(dotenv_path=ENV_PATH, override=True)
+
 # ========== 基础请求配置 ==========
 BASE_URL = "https://prts.wiki"
 TERM_STATIC_URL = f"{BASE_URL}/w/术语释义"
