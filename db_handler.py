@@ -222,17 +222,15 @@ class DBHandler:
         try:
             sql = """
             INSERT INTO global_terms (
-                term_name, term_type, term_explanation
-            ) VALUES (%s, %s, %s)
+                term_name, term_explanation
+            ) VALUES (%s, %s)
             ON DUPLICATE KEY UPDATE 
-                term_explanation = VALUES(term_explanation),
-                term_type = VALUES(term_type)
+                term_explanation = VALUES(term_explanation)
             """
             values_list = []
             for term in terms:
                 values_list.append((
                     term["term_name"],
-                    term.get("term_type", ""),
                     term.get("term_explanation", "")
                 ))
             cursor.executemany(sql, values_list)
