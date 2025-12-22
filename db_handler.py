@@ -1,4 +1,3 @@
-# db_handler.py
 import mysql.connector
 from mysql.connector import Error
 from config import DB_CONFIG
@@ -8,15 +7,18 @@ class DBHandler:
     def __init__(self):
         self.config = DB_CONFIG
         self.connection = None
+        self.connected = False  # 新增：标记连接状态
 
     def connect(self):
         """建立数据库连接"""
         try:
             self.connection = mysql.connector.connect(**self.config)
             if self.connection.is_connected():
+                self.connected = True  # 标记为已连接
                 logger.info("✅ 数据库连接成功（适配新表结构）")
                 return True
         except Error as e:
+            self.connected = False  # 连接失败标记为未连接
             logger.error(f"❌ 数据库连接失败: {str(e)}")
         return False
 
@@ -24,7 +26,25 @@ class DBHandler:
         """关闭数据库连接"""
         if self.connection and self.connection.is_connected():
             self.connection.close()
-            logger.info("🔌 数据库连接已关闭")
+        self.connected = False  # 关闭后标记为未连接
+        logger.info("🔌 数据库连接已关闭")
+
+    # ========== 新增：检查连接状态方法 ==========
+    def is_connected(self):
+        """检查数据库连接是否有效"""
+        try:
+            # 双重校验：标记位 + 实际连接状态
+            return self.connected and self.connection and self.connection.is_connected()
+        except Exception:
+            self.connected = False
+            return False
+
+    # ========== 新增：重新连接方法 ==========
+    def reconnect(self):
+        """重新连接数据库（关闭旧连接后重试）"""
+        logger.warning("🔄 尝试重新连接数据库...")
+        self.close()  # 先关闭旧连接
+        return self.connect()  # 重新建立连接
 
     def count_operators(self):
         """统计干员基础信息数量"""
@@ -90,7 +110,7 @@ class DBHandler:
 
     def update_operator_base(self, base_info):
         """干员基础信息补充"""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():  # 改用新方法检查连接
             logger.error("❌ 数据库未连接，无法更新干员基础信息")
             return False
             
@@ -142,7 +162,7 @@ class DBHandler:
 
     def insert_operator_attr(self, name_cn, attr_list):
         """插入干员属性（适配operator_attr表结构）"""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():  # 改用新方法检查连接
             logger.error("❌ 数据库未连接，无法插入干员属性")
             return False
             
@@ -186,7 +206,7 @@ class DBHandler:
 
     def insert_operator_talent(self, name_cn, talents):
         """插入干员天赋（适配operator_talent + operator_talent_detail表）"""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():  # 改用新方法检查连接
             logger.error("❌ 数据库未连接，无法插入干员天赋")
             return False
             
@@ -245,7 +265,7 @@ class DBHandler:
 
     def insert_operator_skill(self, name_cn, skills):
         """插入干员技能（适配operator_skill + operator_skill_level表）"""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():  # 改用新方法检查连接
             logger.error("❌ 数据库未连接，无法插入干员技能")
             return False
             
@@ -308,7 +328,7 @@ class DBHandler:
             
     def insert_global_terms(self, terms):
         """插入全局术语"""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():  # 改用新方法检查连接
             logger.error("❌ 数据库未连接，无法插入全局术语")
             return False
             
@@ -344,7 +364,7 @@ class DBHandler:
             
     def count_global_terms(self):
         """统计全局术语数量"""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():  # 改用新方法检查连接
             logger.error("❌ 数据库未连接，无法统计全局术语数量")
             return 0
             
@@ -359,10 +379,9 @@ class DBHandler:
         finally:
             cursor.close()
 
-
     def insert_operator_term_relation(self, name_cn, term_relations):
         """插入干员-术语关联"""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():  # 改用新方法检查连接
             logger.error("❌ 数据库未连接，无法插入干员术语关联")
             return False
             
@@ -401,7 +420,7 @@ class DBHandler:
 
     def batch_insert_operator_base(self, ops_list: list[dict]):
         """批量插入干员基础信息（从干员一览数据）"""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():  # 改用新方法检查连接
             logger.error("❌ 数据库未连接，无法批量插入干员基础信息")
             return False
             
@@ -455,7 +474,7 @@ class DBHandler:
     
     def select_all_operators(self):
         """查询所有干员基础信息"""
-        if not self.connection or not self.connection.is_connected():
+        if not self.is_connected():  # 改用新方法检查连接
             logger.error("❌ 数据库未连接，无法查询干员基础信息")
             return None
             
@@ -469,6 +488,7 @@ class DBHandler:
             return None
         finally:
             cursor.close()
+
 # 调用示例（可单独调试）
 if __name__ == "__main__":
     # 初始化DBHandler
