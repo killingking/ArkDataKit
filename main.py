@@ -183,12 +183,21 @@ async def sync_operator_detail_to_db(db: DBHandler, operator_name: str):
         return False
 
 # 批量同步多个干员（复用DB连接，优化性能）
+# main.py 中批量同步函数
 async def batch_sync_operators(db: DBHandler, operator_names: list[str]):
-    """批量同步多个干员详情（复用单个DB连接，修复反爬+容错）"""
+    """批量同步多个干员详情（整合全局浏览器复用）"""
     if not operator_names:
         logger.warning("⚠️ 干员名称列表为空，跳过批量同步")
         return 0
-        
+    
+    # ========== 新增：初始化全局浏览器 ==========
+    await OperatorDetailParser.init_shared_browser()
+    
+    # ========== 新增：数据库长连接（只连1次） ==========
+    if not db.connect():
+        await OperatorDetailParser.close_shared_browser()
+        return 0
+    
     logger.info(f"===== 开始批量同步 {len(operator_names)} 个干员详情 =====")
     success_count = 0
     valid_names = [name.strip() for name in operator_names if name and name.strip()]
@@ -196,38 +205,29 @@ async def batch_sync_operators(db: DBHandler, operator_names: list[str]):
     for i, name in enumerate(valid_names, 1):
         try:
             logger.info(f"进度: {i}/{len(valid_names)} - 开始同步 {name}")
-            
-            # 检查数据库连接状态，如果失效则重新连接
-            if not db.connection or not db.connection.is_connected():
-                logger.warning("⚠️ 数据库连接已失效，尝试重新连接")
-                if not db.connect():
+            # 检查数据库连接（失效则重连）
+            if not db.is_connected():
+                logger.warning(f"⚠️ 数据库连接失效，尝试重连...")
+                if not db.reconnect():
                     logger.error(f"❌ 数据库重连失败，跳过干员 {name}")
                     continue
-            
-            # 复用外部DB连接，无需内部创建
+            # 执行同步
             result = await sync_operator_detail_to_db(db, name)
             if result:
                 success_count += 1
-                
-            # 每处理10个干员检查一次连接状态
-            if i % 10 == 0:
-                logger.debug(f"🔍 检查数据库连接状态（进度: {i}/{len(valid_names)}）")
-                
         except Exception as e:
             logger.error(f"❌ 批量同步中干员 {name} 失败: {str(e)}", exc_info=True)
-            
-            # 尝试重新连接数据库
-            try:
-                logger.info("🔄 尝试重新连接数据库...")
-                db.connect()
-            except Exception as reconnect_error:
-                logger.error(f"❌ 数据库重连失败: {str(reconnect_error)}")
-        
-        # 反爬等待（最后一个无需等待）
-        if i < len(valid_names):
-            await asyncio.sleep(2)
+            # 异常后重置page，避免影响下一个
+            continue
+        finally:
+            # 延长等待时间，减少反爬+资源占用
+            if i < len(valid_names):
+                await asyncio.sleep(3)
     
+    # ========== 新增：批量结束后清理资源 ==========
     logger.info(f"===== 批量同步完成，成功: {success_count}/{len(valid_names)} =====")
+    await OperatorDetailParser.close_shared_browser()  # 关闭全局浏览器
+    db.close()  # 关闭数据库长连接
     return success_count
 
 def sync_operators_detail():

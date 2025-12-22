@@ -1,15 +1,73 @@
-# operators_detail_parse.py
 import asyncio
 import json
 import re
 from datetime import datetime
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from bs4 import BeautifulSoup
-from config import BASE_URL, PLAYWRIGHT_CONFIG
+from config import BASE_URL, PLAYWRIGHT_CONFIG, JSON_OUTPUT_DIR  # 补充JSON_OUTPUT_DIR导入
 from utils import logger, clean_text, clean_desc, clean_filename, ensure_output_dir
 
 class OperatorDetailParser:
     """干员详情解析器（有状态类封装，维护page/soup）"""
+    # ========== 关键修改1：新增全局复用的浏览器/上下文 ==========
+    _shared_playwright = None
+    _shared_browser = None
+    _shared_context = None
+    _browser_initialized = False
+
+    # ========== 关键修改2：类方法初始化全局浏览器（只创建1次） ==========
+    @classmethod
+    async def init_shared_browser(cls):
+        """初始化全局复用的浏览器实例（批量爬取时只创建1次）"""
+        if cls._browser_initialized:
+            return cls._shared_context
+
+        try:
+            cls._shared_playwright = await async_playwright().start()
+            # 优化浏览器启动参数：禁用沙箱、限制内存、绕过/dev/shm
+            browser_args = PLAYWRIGHT_CONFIG["browser_args"] + [
+                "--no-sandbox",          # 解决小内存服务器崩溃
+                "--disable-gpu",         # 禁用GPU加速
+                "--disable-dev-shm-usage",# 绕过共享内存限制
+                "--disk-cache-dir=/tmp/playwright-cache",  # 指定缓存目录
+                "--max-old-space-size=512",  # 限制Chrome内存（512M）
+                "--memory-pressure-off"  # 关闭内存压力检测
+            ]
+            # 启动浏览器（复用核心）
+            cls._shared_browser = await cls._shared_playwright.chromium.launch(
+                headless=PLAYWRIGHT_CONFIG["headless"],
+                args=browser_args,
+                timeout=60000  # 浏览器启动超时延长到60秒
+            )
+            # 创建复用的上下文
+            cls._shared_context = await cls._shared_browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            cls._browser_initialized = True
+            logger.info("✅ 全局浏览器实例初始化完成（复用模式）")
+            return cls._shared_context
+        except Exception as e:
+            logger.error(f"❌ 全局浏览器初始化失败：{str(e)}")
+            await cls.close_shared_browser()
+            raise
+
+    # ========== 关键修改3：类方法关闭全局浏览器（批量结束后调用） ==========
+    @classmethod
+    async def close_shared_browser(cls):
+        """关闭全局浏览器实例（批量爬取结束后执行）"""
+        if cls._shared_context:
+            await cls._shared_context.close()
+        if cls._shared_browser:
+            await cls._shared_browser.close()
+        if cls._shared_playwright:
+            await cls._shared_playwright.stop()
+        cls._browser_initialized = False
+        cls._shared_playwright = None
+        cls._shared_browser = None
+        cls._shared_context = None
+        logger.info("🔌 全局浏览器实例已关闭")
+
     def __init__(self, operator_name: str):
         # 初始化配置和状态
         self.operator_name = operator_name.strip()
@@ -23,43 +81,50 @@ class OperatorDetailParser:
         self.tooltip_selectors = PLAYWRIGHT_CONFIG["tooltip_selectors"]
         self.wait_times = PLAYWRIGHT_CONFIG["wait_time"]
         self.timeouts = PLAYWRIGHT_CONFIG["timeout"]
+        # 原有browser_args保留（但实际用全局的）
         self.browser_args = PLAYWRIGHT_CONFIG["browser_args"]
         self.headless = PLAYWRIGHT_CONFIG["headless"]
 
+    # ========== 关键修改4：重构_init_browser_page，复用全局浏览器 ==========
     async def _init_browser_page(self):
-        """内部方法：初始化浏览器和页面（封装重复逻辑）"""
+        """内部方法：初始化页面（复用全局浏览器，只新建page）"""
         if not self.operator_name:
             raise ValueError("❌ 干员名称不能为空")
         
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                p = await async_playwright().start()
-                # 启动浏览器（调试时headless=False）
-                browser = await p.chromium.launch(
-                    headless=self.headless,
-                    args=self.browser_args
+                # 复用全局浏览器上下文，不再新建browser
+                context = await self.init_shared_browser()
+                self.page = await context.new_page()
+                
+                # 优化超时配置
+                self.page.set_default_timeout(self.timeouts["page_load"] or 60000)  # 至少60秒
+                self.page.set_default_navigation_timeout(self.timeouts["page_load"] or 60000)
+                
+                # 加载页面：改为wait_until="load"（完全加载）+ 延长超时
+                await self.page.goto(
+                    self.url, 
+                    wait_until="load",  # 关键：从domcontentloaded改为load
+                    timeout=60000       # 页面加载超时延长到60秒
                 )
-                self.page = await browser.new_page()
-                
-                # 设置超时和错误处理
-                self.page.set_default_timeout(self.timeouts["page_load"])
-                
-                # 加载页面（等待DOM加载完成）
-                await self.page.goto(self.url, wait_until="domcontentloaded")
-                # 等待核心内容区加载
-                await self.page.wait_for_selector("#mw-content-text", timeout=self.timeouts["page_load"])
+                # 等待核心内容+网络空闲（解决动态内容加载不全）
+                await self.page.wait_for_selector("#mw-content-text", timeout=60000)
+                await self.page.wait_for_load_state("networkidle")  # 等待网络空闲
+                await asyncio.sleep(1)  # 额外等待1秒
                 logger.info(f"✅ 浏览器页面初始化完成：{self.url}")
-                return browser
+                return None  # 不再返回browser（全局复用）
                 
             except Exception as e:
                 if attempt == max_retries - 1:
                     raise Exception(f"❌ 页面初始化失败，已重试{max_retries}次: {str(e)}")
                 
                 logger.warning(f"⚠️ 页面初始化失败，正在重试 ({attempt + 1}/{max_retries}): {str(e)}")
-                if 'browser' in locals():
-                    await browser.close()
-                await asyncio.sleep(2)  # 等待后重试
+                # 失败时关闭当前page，避免泄漏
+                if self.page:
+                    await self.page.close()
+                    self.page = None
+                await asyncio.sleep(3)  # 重试间隔延长到3秒
 
     async def _get_soup(self):
         """内部方法：复用soup对象（避免重复解析页面）"""
@@ -315,8 +380,9 @@ class OperatorDetailParser:
         logger.debug(f"📊 解析到技能数量：{len(skills)}")
         return skills
 
+    # ========== 关键修改5：优化术语提取，减少资源消耗 ==========
     async def parse_terms(self):
-        """解析干员相关术语"""
+        """解析干员相关术语（优化：限制数量、提前检测崩溃）"""
         await self._get_soup()
         terms = []
         term_seen = set()
@@ -350,8 +416,8 @@ class OperatorDetailParser:
                 logger.error("❌ 页面已崩溃，无法进行术语提取")
                 return terms
 
-            # 4. 限制最大处理数量，避免过度处理
-            max_terms = min(total_terms, 50)  # 限制最多处理50个术语
+            # 4. 限制最大处理数量（从50降到20，减少资源消耗）
+            max_terms = min(total_terms, 20)  # 关键：限制最多处理20个
             processed_terms = 0
 
             # 5. 逐个处理术语
@@ -387,11 +453,11 @@ class OperatorDetailParser:
                         logger.debug(f"⚠️  术语{term_name}匹配{match_count}个元素，取第一个")
                         logger.info(f"⚠️  术语{idx}/{total_terms}：定位器匹配{match_count}个元素，已取第一个 → 名称：{term_name}")
 
-                    # 3.2 悬浮触发提示框
-                    await locator.wait_for(state="visible", timeout=self.timeouts["locator_wait"])
+                    # 3.2 悬浮触发提示框（缩短等待时间）
+                    await locator.wait_for(state="visible", timeout=self.timeouts["locator_wait"] or 10000)
                     await locator.scroll_into_view_if_needed()
                     await locator.hover(force=True)
-                    await asyncio.sleep(self.wait_times["tooltip_render"])
+                    await asyncio.sleep(self.wait_times["tooltip_render"] or 0.5)  # 缩短到0.5秒
 
                     # 3.3 提取提示框内容
                     term_type = "无"
@@ -406,7 +472,7 @@ class OperatorDetailParser:
                             strong_handles = await tip_locator.locator("strong").all()
                             strong_texts = []
                             for handle in strong_handles:
-                                text = await handle.inner_text(timeout=self.timeouts["text_extract"])
+                                text = await handle.inner_text(timeout=self.timeouts["text_extract"] or 5000)
                                 clean_text_val = text.strip().split(":")[0].rstrip("：:")
                                 if clean_text_val:
                                     strong_texts.append(clean_text_val)
@@ -419,7 +485,7 @@ class OperatorDetailParser:
                             content_handles = await tip_locator.locator(":not(strong)").all()
                             content_parts = []
                             for handle in content_handles:
-                                text = await handle.inner_text(timeout=self.timeouts["text_extract"])
+                                text = await handle.inner_text(timeout=self.timeouts["text_extract"] or 5000)
                                 clean_text_val = text.strip()
                                 if clean_text_val:
                                     content_parts.append(clean_text_val)
@@ -427,7 +493,7 @@ class OperatorDetailParser:
 
                             # 正文为空时取完整文本
                             if not term_desc:
-                                full_text = await tip_locator.inner_text(timeout=self.timeouts["text_extract"])
+                                full_text = await tip_locator.inner_text(timeout=self.timeouts["text_extract"] or 5000)
                                 if term_type != "无":
                                     full_text = full_text.replace(f"{term_type}：", "").replace(f"{term_type}:", "").replace(term_type, "")
                                 term_desc = full_text.strip()
@@ -458,10 +524,10 @@ class OperatorDetailParser:
 
                     processed_terms += 1
 
-                    # 3.6 清理状态（避免影响下一个术语）
+                    # 3.6 清理状态（简化，减少资源占用）
                     try:
                         await self.page.mouse.move(100, 100)
-                        await asyncio.sleep(self.wait_times["mouse_move"])
+                        await asyncio.sleep(0.1)  # 缩短到0.1秒
                     except Exception as e:
                         logger.warning(f"⚠️ 鼠标移动失败，继续下一个术语: {str(e)[:30]}")
 
@@ -533,20 +599,20 @@ class OperatorDetailParser:
         except IOError as e:
             logger.error(f"❌ 保存文件失败：{str(e)}")
 
+    # ========== 关键修改6：重构run方法，优化资源释放 ==========
     async def run(self):
-        """一键执行：初始化→解析→保存"""
+        """一键执行：初始化→解析→保存（优化资源释放）"""
         if not self.operator_name:
             logger.error("❌ 干员名称为空，无法解析")
             return None
 
         logger.info(f"=== 开始爬取干员: {self.operator_name} ({self.url}) ===")
-        browser = None
         try:
-            # 初始化浏览器和页面
-            browser = await self._init_browser_page()
+            # 初始化页面（复用全局浏览器）
+            await self._init_browser_page()
             # 执行解析
             result = await self.parse_all()
-            # 保存结果
+            # 保存结果（注释保留）
             # await self.save(result)
 
             # 打印调试信息
@@ -566,13 +632,23 @@ class OperatorDetailParser:
             logger.error(f"❌ 解析错误：{str(e)[:100]}")
             return None
         finally:
-            # 确保浏览器关闭
-            if browser:
-                await browser.close()
-                logger.info("🔌 浏览器已关闭")
+            # ========== 关键：只关闭page，不关闭browser（全局复用） ==========
+            if self.page:
+                await self.page.close()
+                self.page = None
+                logger.info("🔌 浏览器页面已关闭（浏览器实例复用）")
 
 # 保留独立执行入口（方便单独调试）
 if __name__ == "__main__":
     import sys
     operator_name = "焰影苇草" if len(sys.argv) < 2 else sys.argv[1]
-    asyncio.run(OperatorDetailParser(operator_name).run())
+    # 独立运行时手动管理全局浏览器
+    async def main():
+        try:
+            parser = OperatorDetailParser(operator_name)
+            await parser.init_shared_browser()
+            await parser.run()
+        finally:
+            await OperatorDetailParser.close_shared_browser()
+    
+    asyncio.run(main())

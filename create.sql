@@ -140,3 +140,6 @@ CREATE TABLE operator_term_relation (
     -- 唯一索引：避免同一干员-术语-模块重复记录
     UNIQUE KEY uk_op_term_module (name_cn, term_name, relation_module, module_id)
 ) COMMENT '干员-术语关联表（记录每个干员涉及的术语及出现位置）';
+
+/* 删了外键 */
+ALTER TABLE operator_term_relation DROP FOREIGN KEY operator_term_relation_ibfk_2;
