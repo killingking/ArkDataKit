@@ -112,34 +112,65 @@ async def sync_operator_detail_to_db(db: DBHandler, operator_name: str):
                     "res": attr_values.get("res", "")
                 })
         
-        # 执行入库操作
+        # 执行入库操作 - 为每个操作创建独立连接，避免连接失效
         success = True
-        # 更新基础补充字段
-        update_ok = db.update_operator_base(base_info)
-        if not update_ok:
-            logger.warning(f"⚠️ 干员 {operator_name} 基础信息更新失败（可能不存在），尝试插入")
-            db.insert_operator_base(base_info)
         
-        # 插入属性
+        # 定义数据库操作列表
+        operations = []
+        
+        # 基础信息更新操作
+        def update_base_info(op_db):
+            update_ok = op_db.update_operator_base(base_info)
+            if not update_ok:
+                logger.warning(f"⚠️ 干员 {operator_name} 基础信息更新失败（可能不存在），尝试插入")
+                op_db.insert_operator_base(base_info)
+            return True
+        operations.append(("基础信息", update_base_info))
+        
+        # 属性插入操作
         if attr_list:
-            success = db.insert_operator_attr(operator_name, attr_list) and success
+            operations.append(("属性", lambda op_db: op_db.insert_operator_attr(operator_name, attr_list)))
         
-        # 插入天赋
+        # 天赋插入操作
         if "talents" in operator_data and operator_data["talents"]:
-            success = db.insert_operator_talent(operator_name, operator_data["talents"]) and success
+            operations.append(("天赋", lambda op_db: op_db.insert_operator_talent(operator_name, operator_data["talents"])))
         
-        # 插入技能
+        # 技能插入操作
         if "skills" in operator_data and operator_data["skills"]:
-            success = db.insert_operator_skill(operator_name, operator_data["skills"]) and success
+            operations.append(("技能", lambda op_db: op_db.insert_operator_skill(operator_name, operator_data["skills"])))
         
-        # 插入术语关联
+        # 术语关联操作
         if "terms" in operator_data and operator_data["terms"]:
             term_relations = [
                 {"term_name": t.get("term_name", "").strip(), "relation_module": "", "module_id": ""} 
                 for t in operator_data["terms"] if t.get("term_name") and t.get("term_name").strip()
             ]
             if term_relations:
-                success = db.insert_operator_term_relation(operator_name, term_relations) and success
+                operations.append(("术语关联", lambda op_db: op_db.insert_operator_term_relation(operator_name, term_relations)))
+        
+        # 执行所有操作
+        for op_name, op_func in operations:
+            op_db = None
+            try:
+                op_db = DBHandler()
+                if not op_db.connect():
+                    logger.error(f"❌ 数据库连接失败，跳过{op_name}操作")
+                    success = False
+                    continue
+                    
+                result = op_func(op_db)
+                if result is False:
+                    logger.error(f"❌ {op_name}操作失败")
+                    success = False
+                else:
+                    logger.debug(f"✅ {op_name}操作成功")
+                    
+            except Exception as e:
+                logger.error(f"❌ {op_name}操作异常: {str(e)[:100]}")
+                success = False
+            finally:
+                if op_db:
+                    op_db.close()
                 
         if success:
             logger.info(f"✅ 干员 {operator_name} 详情同步完成")
@@ -165,12 +196,32 @@ async def batch_sync_operators(db: DBHandler, operator_names: list[str]):
     for i, name in enumerate(valid_names, 1):
         try:
             logger.info(f"进度: {i}/{len(valid_names)} - 开始同步 {name}")
+            
+            # 检查数据库连接状态，如果失效则重新连接
+            if not db.connection or not db.connection.is_connected():
+                logger.warning("⚠️ 数据库连接已失效，尝试重新连接")
+                if not db.connect():
+                    logger.error(f"❌ 数据库重连失败，跳过干员 {name}")
+                    continue
+            
             # 复用外部DB连接，无需内部创建
             result = await sync_operator_detail_to_db(db, name)
             if result:
                 success_count += 1
+                
+            # 每处理10个干员检查一次连接状态
+            if i % 10 == 0:
+                logger.debug(f"🔍 检查数据库连接状态（进度: {i}/{len(valid_names)}）")
+                
         except Exception as e:
             logger.error(f"❌ 批量同步中干员 {name} 失败: {str(e)}", exc_info=True)
+            
+            # 尝试重新连接数据库
+            try:
+                logger.info("🔄 尝试重新连接数据库...")
+                db.connect()
+            except Exception as reconnect_error:
+                logger.error(f"❌ 数据库重连失败: {str(reconnect_error)}")
         
         # 反爬等待（最后一个无需等待）
         if i < len(valid_names):

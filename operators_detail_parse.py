@@ -31,19 +31,35 @@ class OperatorDetailParser:
         if not self.operator_name:
             raise ValueError("❌ 干员名称不能为空")
         
-        p = await async_playwright().start()
-        # 启动浏览器（调试时headless=False）
-        browser = await p.chromium.launch(
-            headless=self.headless,
-            args=self.browser_args
-        )
-        self.page = await browser.new_page()
-        # 加载页面（等待DOM加载完成）
-        await self.page.goto(self.url, wait_until="domcontentloaded")
-        # 等待核心内容区加载
-        await self.page.wait_for_selector("#mw-content-text", timeout=self.timeouts["page_load"])
-        logger.info(f"✅ 浏览器页面初始化完成：{self.url}")
-        return browser
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                p = await async_playwright().start()
+                # 启动浏览器（调试时headless=False）
+                browser = await p.chromium.launch(
+                    headless=self.headless,
+                    args=self.browser_args
+                )
+                self.page = await browser.new_page()
+                
+                # 设置超时和错误处理
+                self.page.set_default_timeout(self.timeouts["page_load"])
+                
+                # 加载页面（等待DOM加载完成）
+                await self.page.goto(self.url, wait_until="domcontentloaded")
+                # 等待核心内容区加载
+                await self.page.wait_for_selector("#mw-content-text", timeout=self.timeouts["page_load"])
+                logger.info(f"✅ 浏览器页面初始化完成：{self.url}")
+                return browser
+                
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise Exception(f"❌ 页面初始化失败，已重试{max_retries}次: {str(e)}")
+                
+                logger.warning(f"⚠️ 页面初始化失败，正在重试 ({attempt + 1}/{max_retries}): {str(e)}")
+                if 'browser' in locals():
+                    await browser.close()
+                await asyncio.sleep(2)  # 等待后重试
 
     async def _get_soup(self):
         """内部方法：复用soup对象（避免重复解析页面）"""
@@ -327,8 +343,23 @@ class OperatorDetailParser:
             if total_terms == 0:
                 return terms
 
-            # 3. 逐个处理术语
+            # 3. 检查页面状态，如果页面已崩溃则提前退出
+            try:
+                await self.page.evaluate("() => document.title")
+            except Exception as e:
+                logger.error("❌ 页面已崩溃，无法进行术语提取")
+                return terms
+
+            # 4. 限制最大处理数量，避免过度处理
+            max_terms = min(total_terms, 50)  # 限制最多处理50个术语
+            processed_terms = 0
+
+            # 5. 逐个处理术语
             for idx, term_tag in enumerate(term_tags, 1):
+                if processed_terms >= max_terms:
+                    logger.info(f"⏭️ 已达到最大处理数量 {max_terms}，停止处理")
+                    break
+                    
                 term_name = clean_text(term_tag).strip()
                 # 跳过重复或无效术语
                 if not term_name or term_name in term_seen:
@@ -425,21 +456,33 @@ class OperatorDetailParser:
                         total_success += 1
                         logger.info(f"✅ 术语{idx}/{total_terms}：成功 → 名称：{term_name} | 类型：{term_type} | 描述长度：{len(formatted_desc)}字")
 
+                    processed_terms += 1
+
                     # 3.6 清理状态（避免影响下一个术语）
-                    await self.page.mouse.move(100, 100)
-                    await asyncio.sleep(self.wait_times["mouse_move"])
+                    try:
+                        await self.page.mouse.move(100, 100)
+                        await asyncio.sleep(self.wait_times["mouse_move"])
+                    except Exception as e:
+                        logger.warning(f"⚠️ 鼠标移动失败，继续下一个术语: {str(e)[:30]}")
 
                 except PlaywrightTimeoutError:
                     logger.info(f"❌ 术语{idx}/{total_terms}：失败（超时）→ 名称：{term_name}")
                     total_failed += 1
+                    processed_terms += 1
                     continue
                 except AttributeError as e:
                     logger.info(f"❌ 术语{idx}/{total_terms}：失败（属性错误）→ 名称：{term_name} | 错误：{str(e)[:50]}")
                     total_failed += 1
+                    processed_terms += 1
                     continue
                 except Exception as e:
+                    error_msg = str(e).lower()
+                    if "crashed" in error_msg or "target crashed" in error_msg:
+                        logger.error(f"❌ 页面崩溃，停止术语提取：{str(e)[:50]}")
+                        break  # 页面崩溃时立即退出
                     logger.info(f"❌ 术语{idx}/{total_terms}：失败（未知错误）→ 名称：{term_name} | 错误：{str(e)[:50]}")
                     total_failed += 1
+                    processed_terms += 1
                     continue
 
         except Exception as e:

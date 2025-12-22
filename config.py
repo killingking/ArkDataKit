@@ -20,9 +20,9 @@ PLAYWRIGHT_CONFIG = {
     "headless": True,  # 调试时改为False，可看到浏览器操作
     "browser_args": ["--no-sandbox", "--disable-dev-shm-usage"],  # 适配Linux/Windwos
     "timeout": {
-        "page_load": timedelta(seconds=20).total_seconds() * 1000,  # 20秒
-        "locator_wait": timedelta(seconds=3).total_seconds() * 1000,  # 3秒
-        "text_extract": timedelta(seconds=1.5).total_seconds() * 1000  # 1.5秒
+        "page_load": timedelta(seconds=30).total_seconds() * 1000,  # 30秒，增加页面加载超时
+        "locator_wait": timedelta(seconds=5).total_seconds() * 1000,  # 5秒，增加定位器等待
+        "text_extract": timedelta(seconds=2).total_seconds() * 1000  # 2秒，增加文本提取超时
     },
     "wait_time": {
         "tooltip_render": 1.2,  # 提示框渲染等待
