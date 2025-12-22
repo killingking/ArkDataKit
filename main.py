@@ -13,13 +13,14 @@ def sync_terms_to_db():
     crawler = TermStaticCrawler()
     terms = crawler.run()
     db = DBHandler()
-    if not terms or not db.count_global_terms()<=len(terms):
+    if not terms or db.connect():
         logger.warning("⚠️ 无有效术语，跳过入库")
+        return    
+    if db.count_global_terms() >= len(terms):
+        logger.warning("⚠️ 术语已存在，跳过入库")
         return
-        
-    if db.connect():
-        db.insert_global_terms(terms)
-        db.close()
+    db.insert_global_terms(terms)
+    db.close()        
 
 def sync_operator_list_to_db():
     """干员一览爬取→批量入库"""
@@ -110,7 +111,6 @@ if __name__ == "__main__":
     # 2. 同步静态术语    # 2. 同步静态术语（先于干员详情同步）
     sync_terms_to_db()
 
-    sync_terms_to_db()
     
     # 3. 同步单个干员详情（补充属性/天赋/技能）
     # asyncio.run(sync_operator_detail_to_db("焰影苇草"))
