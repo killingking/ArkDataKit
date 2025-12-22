@@ -25,7 +25,8 @@ class DBHandler:
         if self.connection and self.connection.is_connected():
             self.connection.close()
             logger.info("🔌 数据库连接已关闭")
-    def count_operator_base(self):
+
+    def count_operators(self):
         """统计干员基础信息数量"""
         cursor = self.connection.cursor()
         try:
@@ -38,7 +39,7 @@ class DBHandler:
         finally:
             cursor.close()
         return 0
-        
+
     def insert_operator_base(self, base_info):
         """插入干员基础信息（适配operator_base表结构）"""
         cursor = self.connection.cursor()

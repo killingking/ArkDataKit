@@ -54,7 +54,7 @@ def sync_operator_list_to_db():
             logger.error("❌ 数据库连接失败，跳过入库")
             return
 
-        if db.count_operators_base() >= len(ops_list):
+        if db.count_operator() >= len(ops_list):
             logger.warning("⚠️ 无新增干员，跳过入库")
             return
         db.batch_insert_operator_base(ops_list)
