@@ -134,7 +134,7 @@ class OperatorDetailParser:
         return self.soup
 
     async def parse_attrs(self):
-        """解析干员属"""
+        """解析干员属性"""  # 补全注释错别字
         await self._get_soup()
         # 初始化基础属性结构
         base_attrs = {
@@ -156,7 +156,12 @@ class OperatorDetailParser:
                 "trust_bonus" if "信赖加成上限" in h else
                 "" for h in headers
             ]
-            attr_mapping = {"生命上限": "max_hp", "攻击": "atk", "防御": "def", "法术抗性": "res"}
+            attr_mapping = {
+                "生命上限": "max_hp",
+                "攻击": "atk",
+                "防御": "def",
+                "法术抗性": "res"
+            }  # 调整字典格式，PEP8规范
             
             for tr in base_tbl.select("tr")[1:]:
                 tds = [clean_text(td) for td in tr.select("th, td")]
@@ -167,33 +172,40 @@ class OperatorDetailParser:
                     if idx < len(key_mapping) and key_mapping[idx]:
                         base_attrs[key_mapping[idx]][attr_key] = val
 
-        # 解析额外属性（还原最初的简洁逻辑）
+        # 解析额外属性（修复语法错误+规范格式）
         extra_attrs = {}
         extra_tbl = self.soup.select_one("table.char-extra-attr-table")
         if extra_tbl:
+            # 字段映射移到循环外（避免重复创建，更高效）
+            extra_key_map = {
+                "再部署时间": "redployment_time",
+                "初始部署费用": "initial_deployment_cost",
+                "攻击间隔": "attack_interval",
+                "阻挡数": "block_count",
+                "所属势力": "faction",
+                "隐藏势力": "hidden_faction"
+            }
             for tr in extra_tbl.select("tr"):
                 ths = tr.select("th")
                 tds = tr.select("td")
                 if not ths or not tds:
                     continue
-                # 仅保留最基础的文本提取
-                th_text = th_text.replace('"', '').replace('“', '').replace('”', '').strip() 
+                # 修复核心：先定义th_text，再清理引号
+                th_text = clean_text(ths[0])  # 先提取原始文本
+                th_text = th_text.replace('"', '').replace('“', '').replace('”', '').strip()  # 清理引号
                 td_text = clean_text(tds[0])
-                # 基础的字段映射
-                extra_key_map = {
-                    "再部署时间": "redployment_time",
-                    "初始部署费用": "initial_deployment_cost",
-                    "攻击间隔": "attack_interval",
-                    "阻挡数": "block_count",
-                    "所属势力": "faction",
-                    "隐藏势力": "hidden_faction"
-                }
+                
                 if th_text in extra_key_map:
                     extra_attrs[extra_key_map[th_text]] = td_text
-                    logger.debug(f"✅ 解析额外属性：{th_text} → {extra_key_map[th_text]} = {td_text}")
+                    logger.debug(
+                        f"✅ 解析额外属性：{th_text} → {extra_key_map[th_text]} = {td_text}"
+                    )  # 长日志换行，符合PEP8
 
         logger.debug(f"📋 解析到的额外属性：{extra_attrs}")
-        return {"base_attributes": base_attrs, "extra_attributes": extra_attrs}
+        return {
+            "base_attributes": base_attrs,
+            "extra_attributes": extra_attrs
+        } 
     async def parse_chara(self):
         """解析干员特性和分支"""
         await self._get_soup()
