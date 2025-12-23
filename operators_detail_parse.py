@@ -421,11 +421,10 @@ class OperatorDetailParser:
                 b_tag = p_tag.find("b")
                 if not b_tag:
                     continue
-                b_text = clean_text(b_tag)
-                # 匹配任意一个关键词
-                if any(keyword in b_text for keyword in target_keywords):
+                #  匹配任意一个关键词
+                if any(keyword in clean_text(b_tag) for keyword in target_keywords):
                     skill_p_tag = p_tag
-                    logger.debug(f"✅ 找到技能{skill_idx}的<p>标签：{b_text}")
+                    logger.debug(f"✅ 找到技能{skill_idx}的<p>标签：{clean_text(b_tag)}")
                     break
             
             # 没找到技能X的<p>标签 → 停止查找（无标识就不要）

@@ -33,11 +33,19 @@ logger = init_logger()
 
 # ========== 文本处理工具 ==========
 def clean_text(tag, replace_plus=True, handle_br=False) -> str:
-    """统一文本清理函数（兼容不同场景）"""
+    """统一文本清理函数（兼容字符串/BeautifulSoup元素，不破坏原有逻辑）"""
     if not tag:
         return ""
     
-    # 处理<br>标签（静态术语场景用）
+    # 新增：兼容字符串输入（核心适配，不影响原有bs4元素逻辑）
+    if isinstance(tag, str):
+        text = tag.strip()
+        text = re.sub(r"\s+", " ", text).strip()
+        if replace_plus:
+            text = text.replace("（+）", "").strip()
+        return text
+    
+    # 原有逻辑（处理bs4元素）完全保留
     if handle_br:
         for br in tag.find_all("br"):
             br.replace_with("\n")
@@ -45,7 +53,6 @@ def clean_text(tag, replace_plus=True, handle_br=False) -> str:
         text = re.sub(r"\s+", " ", text).strip()
         return text
     
-    # 常规文本清理（干员解析场景用）
     text = tag.get_text(strip=True)
     if replace_plus:
         text = text.replace("（+）", "").strip()
