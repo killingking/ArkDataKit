@@ -135,11 +135,8 @@ CREATE TABLE operator_term_relation (
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '入库时间',
     update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     -- 外键关联：删除/更新干员/术语时同步删除关联记录（注释用-- 说明）
-    FOREIGN KEY (name_cn) REFERENCES operator_base(name_cn) ON DELETE CASCADE ON UPDATE CASCADE,
-    FOREIGN KEY (term_name) REFERENCES global_terms(term_name) ON DELETE CASCADE ON UPDATE CASCADE,
+    -- FOREIGN KEY (name_cn) REFERENCES operator_base(name_cn) ON DELETE CASCADE ON UPDATE CASCADE,
+    -- FOREIGN KEY (term_name) REFERENCES global_terms(term_name) ON DELETE CASCADE ON UPDATE CASCADE,
     -- 唯一索引：避免同一干员-术语-模块重复记录
     UNIQUE KEY uk_op_term_module (name_cn, term_name, relation_module, module_id)
 ) COMMENT '干员-术语关联表（记录每个干员涉及的术语及出现位置）';
-
-/* 删了外键 */
-ALTER TABLE operator_term_relation DROP FOREIGN KEY operator_term_relation_ibfk_2;

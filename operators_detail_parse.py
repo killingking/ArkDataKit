@@ -134,9 +134,9 @@ class OperatorDetailParser:
         return self.soup
 
     async def parse_attrs(self):
-        """解析干员属性（基础属性+额外属性）"""
+        """解析干员属性（基础属性+额外属性）—— 修复hidden_faction获取问题"""
         await self._get_soup()
-        # 初始化基础属性结构
+        # 初始化基础属性结构（原有逻辑保留）
         base_attrs = {
             "elite_0_level_1": {},
             "elite_0_max": {},
@@ -148,7 +148,6 @@ class OperatorDetailParser:
         
         if base_tbl:
             headers = [clean_text(th) for th in base_tbl.select("tr:first-child th, tr:first-child td")]
-            # 表头映射逻辑
             key_mapping = [
                 "elite_0_level_1" if "精英0 1级" in h else
                 "elite_0_max" if "精英0 满级" in h else
@@ -159,36 +158,60 @@ class OperatorDetailParser:
             ]
             attr_mapping = {"生命上限": "max_hp", "攻击": "atk", "防御": "def", "法术抗性": "res"}
             
-            # 解析属性行（跳过表头）
             for tr in base_tbl.select("tr")[1:]:
                 tds = [clean_text(td) for td in tr.select("th, td")]
                 if len(tds) < 2:
                     continue
                 attr_key = attr_mapping.get(tds[0], tds[0].lower())
-                # 填充属性值
                 for idx, val in enumerate(tds[1:], 1):
                     if idx < len(key_mapping) and key_mapping[idx]:
                         base_attrs[key_mapping[idx]][attr_key] = val
 
-        # 解析额外属性
+        # ========== 修复：额外属性解析（重点修改这里） ==========
         extra_attrs = {}
+        # 1. 增加备选选择器（应对Wiki页面class更新）
         extra_tbl = self.soup.select_one("table.char-extra-attr-table")
+        if not extra_tbl:
+            extra_tbl = self.soup.select_one("table.wikitable.char-extra-attr")  # 备选class
+            if not extra_tbl:
+                logger.warning("⚠️ 未找到额外属性表格，跳过额外属性解析")
+                return {"base_attributes": base_attrs, "extra_attributes": extra_attrs}
+
+        # 2. 模糊匹配key（解决“隐藏势力?”带问号的问题）
         extra_key_map = {
             "再部署时间": "redployment_time",
             "初始部署费用": "initial_deployment_cost",
             "攻击间隔": "attack_interval",
             "阻挡数": "block_count",
             "所属势力": "faction",
-            "隐藏势力": "hidden_faction"
+            "隐藏势力": "hidden_faction"  # 用“包含匹配”替代“精确匹配”
         }
-        
-        if extra_tbl:
-            for tr in extra_tbl.select("tr"):
-                cells = [clean_text(cell) for cell in tr.select("th, td")]
-                # 按两两分组解析（避免索引越界）
-                for i in range(0, len(cells) - 1, 2):
-                    raw_key, val = cells[i], cells[i+1]
-                    extra_attrs[extra_key_map.get(raw_key, raw_key)] = val
+
+        # 3. 优化行解析：支持一行1组/2组key-value，不遗漏字段
+        for tr in extra_tbl.select("tr"):
+            # 提取单元格文本（过滤空内容）
+            cells = [clean_text(cell).strip() for cell in tr.select("th, td") if clean_text(cell).strip()]
+            if len(cells) < 2:
+                continue  # 跳过无效行
+
+            # 遍历单元格，按“key-value”对处理（一行可包含1组或2组）
+            for i in range(0, len(cells), 2):
+                if i + 1 >= len(cells):
+                    break
+                raw_key = cells[i]
+                val = cells[i+1]
+
+                # 模糊匹配：只要raw_key包含map_key，就绑定字段（解决“隐藏势力?”的问题）
+                matched_field = None
+                for map_key, field in extra_key_map.items():
+                    if map_key in raw_key:
+                        matched_field = field
+                        break
+                if matched_field:
+                    extra_attrs[matched_field] = val
+                    logger.debug(f"✅ 解析额外属性：{raw_key} → {matched_field} = {val}")
+                else:
+                    logger.debug(f"⏭️  跳过未知额外属性：{raw_key} = {val}")
 
         return {"base_attributes": base_attrs, "extra_attributes": extra_attrs}
 
@@ -291,7 +314,7 @@ class OperatorDetailParser:
         return talents
 
     async def parse_skills(self):
-        """解析干员技能"""
+        """解析干员技能（动态适配技能数量，兼容低星干员）"""
         await self._get_soup()
         skills = []
         skill_header = self.soup.find("span", id="技能")
@@ -362,22 +385,42 @@ class OperatorDetailParser:
 
             return skill
 
-        # 解析3个技能
-        current_table = skill_header.find_parent("h2").find_next_sibling("table")
+        # ========== 核心修改：动态查找技能表格（替代固定循环3次） ==========
         skill_tables = []
-        for _ in range(3):
-            if current_table and "wikitable" in current_table.get("class", []):
-                skill_tables.append(current_table)
-                current_table = current_table.find_next_sibling("table", class_="wikitable nomobile logo")
-            else:
-                logger.debug(f"⚠️  未找到第{len(skill_tables)+1}个技能表格")
+        # 1. 找到「技能」大标题的父H2节点
+        skill_h2 = skill_header.find_parent("h2")
+        if not skill_h2:
+            logger.debug("⚠️  未找到技能H2标题")
+            return skills
+
+        # 2. 遍历「技能1」「技能2」「技能3」的锚点，动态匹配表格
+        for skill_idx in range(1, 4):  # 最多找3个（游戏内最多3个技能）
+            # 查找「技能X」的锚点span
+            skill_x_anchor = self.soup.find("span", id=f"技能{skill_idx}")
+            if not skill_x_anchor:
+                logger.debug(f"⚠️  未找到「技能{skill_idx}」锚点，停止查找技能表格")
                 break
 
-        # 批量解析技能
+            # 找到锚点对应的表格（锚点的父节点后第一个wikitable表格）
+            skill_x_table = skill_x_anchor.find_parent(["p", "div"]).find_next_sibling("table", class_="wikitable nomobile logo")
+            if not skill_x_table:
+                logger.debug(f"⚠️  未找到「技能{skill_idx}」对应的表格")
+                break
+
+            # 验证表格有效性（包含技能等级相关内容）
+            table_text = skill_x_table.get_text()
+            if "等级" in table_text and "初始SP" in table_text:
+                skill_tables.append(skill_x_table)
+                logger.debug(f"✅ 找到「技能{skill_idx}」对应的表格")
+            else:
+                logger.debug(f"⚠️  「技能{skill_idx}」的表格无效（无技能等级信息）")
+                break
+
+        # 批量解析技能（有多少个表格解析多少个）
         for idx, table in enumerate(skill_tables, 1):
             skills.append(parse_single_skill(table, idx))
 
-        logger.debug(f"📊 解析到技能数量：{len(skills)}")
+        logger.debug(f"📊 解析到技能数量：{len(skills)}（适配干员实际技能数）")
         return skills
 
     # ========== 关键修改5：优化术语提取，减少资源消耗 ==========
