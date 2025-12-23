@@ -15,12 +15,17 @@ class OperatorDetailParser:
     _shared_context = None
     _browser_initialized = False
 
-    # ========== 关键修改2：类方法初始化全局浏览器（只创建1次） ==========
     @classmethod
     async def init_shared_browser(cls):
-        """初始化全局复用的浏览器实例（批量爬取时只创建1次）"""
+        """初始化全局复用的浏览器实例（增加状态检查，失效则重启）"""
+        # 核心：检查现有实例是否存活，失效则清理后重建
         if cls._browser_initialized:
-            return cls._shared_context
+            # 检查上下文是否存活
+            if cls._shared_context and not cls._shared_context.is_closed():
+                return cls._shared_context
+            else:
+                logger.warning("⚠️ 全局上下文已关闭，清理后重新初始化")
+                await cls.close_shared_browser()  # 清理失效实例
 
         try:
             cls._shared_playwright = await async_playwright().start()
@@ -30,7 +35,7 @@ class OperatorDetailParser:
                 "--disable-gpu",         # 禁用GPU加速
                 "--disable-dev-shm-usage",# 绕过共享内存限制
                 "--disk-cache-dir=/tmp/playwright-cache",  # 指定缓存目录
-                "--max-old-space-size=512",  # 限制Chrome内存（512M）
+                "--max-old-space-size=256",  # 限制Chrome内存（512M）
                 "--memory-pressure-off"  # 关闭内存压力检测
             ]
             # 启动浏览器（复用核心）
@@ -52,21 +57,88 @@ class OperatorDetailParser:
             await cls.close_shared_browser()
             raise
 
-    # ========== 关键修改3：类方法关闭全局浏览器（批量结束后调用） ==========
     @classmethod
     async def close_shared_browser(cls):
-        """关闭全局浏览器实例（批量爬取结束后执行）"""
-        if cls._shared_context:
-            await cls._shared_context.close()
-        if cls._shared_browser:
-            await cls._shared_browser.close()
-        if cls._shared_playwright:
-            await cls._shared_playwright.stop()
-        cls._browser_initialized = False
-        cls._shared_playwright = None
-        cls._shared_browser = None
+        """关闭全局浏览器实例（增加空值/存活检查，避免异常）"""
+        # 先关闭上下文（如果存活）
+        if cls._shared_context and not cls._shared_context.is_closed():
+            try:
+                await cls._shared_context.close()
+            except Exception as e:
+                logger.warning(f"⚠️ 关闭上下文时警告：{str(e)}")
         cls._shared_context = None
+
+        # 再关闭浏览器（如果存活）
+        if cls._shared_browser and not cls._shared_browser.is_closed():
+            try:
+                await cls._shared_browser.close()
+            except Exception as e:
+                logger.warning(f"⚠️ 关闭浏览器时警告：{str(e)}")
+        cls._shared_browser = None
+
+        # 最后停止playwright
+        if cls._shared_playwright:
+            try:
+                await cls._shared_playwright.stop()
+            except Exception as e:
+                logger.warning(f"⚠️ 停止Playwright时警告：{str(e)}")
+        cls._shared_playwright = None
+
+        cls._browser_initialized = False
         logger.info("🔌 全局浏览器实例已关闭")
+
+    async def _init_browser_page(self):
+        """内部方法：初始化页面（增加上下文存活检查+崩溃重启）"""
+        if not self.operator_name:
+            raise ValueError("❌ 干员名称不能为空")
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # 关键1：检查并重建全局上下文（如果失效）
+                context = await self.init_shared_browser()
+                if not context or context.is_closed():
+                    raise Exception("全局上下文已失效")
+
+                # 关键2：创建页面前先关闭旧页面（避免泄漏）
+                if self.page and not self.page.is_closed():
+                    await self.page.close()
+                self.page = await context.new_page()
+                
+                # 优化超时配置
+                self.page.set_default_timeout(self.timeouts["page_load"] or 60000)
+                self.page.set_default_navigation_timeout(self.timeouts["page_load"] or 60000)
+                
+                # 加载页面：改为wait_until="load"（完全加载）+ 延长超时
+                await self.page.goto(
+                    self.url, 
+                    wait_until="load",  # 关键：从domcontentloaded改为load
+                    timeout=60000       # 页面加载超时延长到60秒
+                )
+                # 等待核心内容+网络空闲（解决动态内容加载不全）
+                await self.page.wait_for_selector("#mw-content-text", timeout=60000)
+                await self.page.wait_for_load_state("networkidle")
+                await asyncio.sleep(1)  # 额外等待1秒
+                logger.info(f"✅ 浏览器页面初始化完成：{self.url}")
+                return None  # 不再返回browser（全局复用）
+                
+            except Exception as e:
+                error_msg = str(e).lower()
+                # 关键3：如果是浏览器/上下文崩溃，强制重启全局浏览器
+                if "closed" in error_msg or "crashed" in error_msg or "target" in error_msg:
+                    logger.error(f"❌ 浏览器/上下文崩溃，尝试重启（{attempt+1}/{max_retries}）：{str(e)[:50]}")
+                    await self.close_shared_browser()  # 清理失效实例
+                    await asyncio.sleep(5)  # 重启前等待5秒
+                
+                if attempt == max_retries - 1:
+                    raise Exception(f"❌ 页面初始化失败，已重试{max_retries}次: {str(e)}")
+                
+                logger.warning(f"⚠️ 页面初始化失败，正在重试 ({attempt + 1}/{max_retries}): {str(e)}")
+                # 失败时关闭当前page，避免泄漏
+                if self.page:
+                    await self.page.close()
+                    self.page = None
+                await asyncio.sleep(3)  # 重试间隔延长到3秒
 
     def __init__(self, operator_name: str):
         # 初始化配置和状态
@@ -84,47 +156,6 @@ class OperatorDetailParser:
         # 原有browser_args保留（但实际用全局的）
         self.browser_args = PLAYWRIGHT_CONFIG["browser_args"]
         self.headless = PLAYWRIGHT_CONFIG["headless"]
-
-    # ========== 关键修改4：重构_init_browser_page，复用全局浏览器 ==========
-    async def _init_browser_page(self):
-        """内部方法：初始化页面（复用全局浏览器，只新建page）"""
-        if not self.operator_name:
-            raise ValueError("❌ 干员名称不能为空")
-        
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                # 复用全局浏览器上下文，不再新建browser
-                context = await self.init_shared_browser()
-                self.page = await context.new_page()
-                
-                # 优化超时配置
-                self.page.set_default_timeout(self.timeouts["page_load"] or 60000)  # 至少60秒
-                self.page.set_default_navigation_timeout(self.timeouts["page_load"] or 60000)
-                
-                # 加载页面：改为wait_until="load"（完全加载）+ 延长超时
-                await self.page.goto(
-                    self.url, 
-                    wait_until="load",  # 关键：从domcontentloaded改为load
-                    timeout=60000       # 页面加载超时延长到60秒
-                )
-                # 等待核心内容+网络空闲（解决动态内容加载不全）
-                await self.page.wait_for_selector("#mw-content-text", timeout=60000)
-                await self.page.wait_for_load_state("networkidle")  # 等待网络空闲
-                await asyncio.sleep(1)  # 额外等待1秒
-                logger.info(f"✅ 浏览器页面初始化完成：{self.url}")
-                return None  # 不再返回browser（全局复用）
-                
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    raise Exception(f"❌ 页面初始化失败，已重试{max_retries}次: {str(e)}")
-                
-                logger.warning(f"⚠️ 页面初始化失败，正在重试 ({attempt + 1}/{max_retries}): {str(e)}")
-                # 失败时关闭当前page，避免泄漏
-                if self.page:
-                    await self.page.close()
-                    self.page = None
-                await asyncio.sleep(3)  # 重试间隔延长到3秒
 
     async def _get_soup(self):
         """内部方法：复用soup对象（避免重复解析页面）"""

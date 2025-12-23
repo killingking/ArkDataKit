@@ -61,12 +61,13 @@ def sync_operator_list_to_db():
         db.close()
 
 async def sync_operator_detail_to_db(db: DBHandler, operator_name: str):
-    """干员详情解析→入库（复用外部DB连接，修复字段取值+容错）"""
+    """干员详情解析→入库（复用外部DB连接，修复字段取值+容错+资源释放）"""
     logger.info(f"===== 开始同步干员 {operator_name} 详情 =====")
     if not db or not db.connection or not db.connection.is_connected():
         logger.error(f"❌ 数据库未连接，干员 {operator_name} 跳过入库")
         return False  # 返回执行结果，方便统计
-        
+    
+    parser = None
     try:
         # 解析干员详情
         parser = OperatorDetailParser(operator_name)
@@ -75,6 +76,7 @@ async def sync_operator_detail_to_db(db: DBHandler, operator_name: str):
             logger.warning(f"⚠️ 干员 {operator_name} 解析失败，跳过入库")
             return False
         
+        # ========== 原有核心字段验证+入库逻辑（不变） ==========
         # 核心字段验证
         if "operator_name" not in operator_data or "attributes" not in operator_data:
             logger.error(f"❌ 干员 {operator_name} 缺少核心字段，跳过入库")
@@ -181,19 +183,30 @@ async def sync_operator_detail_to_db(db: DBHandler, operator_name: str):
     except Exception as e:
         logger.error(f"❌ 干员 {operator_name} 详情同步过程中发生错误: {str(e)}", exc_info=True)
         return False
+    finally:
+        # 关键：强制关闭当前页面，释放资源（即使解析失败）
+        if parser and parser.page and not parser.page.is_closed():
+            try:
+                await parser.page.close()
+            except Exception as e:
+                logger.warning(f"⚠️ 关闭干员 {operator_name} 页面时警告：{str(e)}")
 
 # 批量同步多个干员（复用DB连接，优化性能）
 # main.py 中批量同步函数
 async def batch_sync_operators(db: DBHandler, operator_names: list[str]):
-    """批量同步多个干员详情（整合全局浏览器复用）"""
+    """批量同步多个干员详情（整合全局浏览器复用+崩溃恢复+延迟优化）"""
     if not operator_names:
         logger.warning("⚠️ 干员名称列表为空，跳过批量同步")
         return 0
     
-    # ========== 新增：初始化全局浏览器 ==========
-    await OperatorDetailParser.init_shared_browser()
+    # ========== 初始化全局浏览器（提前创建，避免首次爬取时初始化） ==========
+    try:
+        await OperatorDetailParser.init_shared_browser()
+    except Exception as e:
+        logger.error(f"❌ 全局浏览器初始化失败，批量同步终止：{str(e)}")
+        return 0
     
-    # ========== 新增：数据库长连接（只连1次） ==========
+    # ========== 数据库长连接检查 ==========
     if not db.connect():
         await OperatorDetailParser.close_shared_browser()
         return 0
@@ -203,6 +216,13 @@ async def batch_sync_operators(db: DBHandler, operator_names: list[str]):
     valid_names = [name.strip() for name in operator_names if name and name.strip()]
     
     for i, name in enumerate(valid_names, 1):
+        # 关键1：每爬取20个干员，重启一次浏览器（避免内存泄漏）
+        if i % 20 == 0:
+            logger.info(f"\n🔄 爬取达20个干员，重启浏览器释放内存...")
+            await OperatorDetailParser.close_shared_browser()
+            await asyncio.sleep(5)
+            await OperatorDetailParser.init_shared_browser()
+        
         try:
             logger.info(f"进度: {i}/{len(valid_names)} - 开始同步 {name}")
             # 检查数据库连接（失效则重连）
@@ -211,20 +231,36 @@ async def batch_sync_operators(db: DBHandler, operator_names: list[str]):
                 if not db.reconnect():
                     logger.error(f"❌ 数据库重连失败，跳过干员 {name}")
                     continue
-            # 执行同步
-            result = await sync_operator_detail_to_db(db, name)
-            if result:
+            
+            # 执行同步（增加单次失败重试）
+            sync_retry = 0
+            sync_success = False
+            while sync_retry < 2 and not sync_success:
+                try:
+                    sync_success = await sync_operator_detail_to_db(db, name)
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    if "closed" in error_msg or "crashed" in error_msg:
+                        logger.warning(f"⚠️ 干员 {name} 同步失败（浏览器崩溃），重试 ({sync_retry+1}/2)")
+                        await OperatorDetailParser.close_shared_browser()
+                        await asyncio.sleep(5)
+                        await OperatorDetailParser.init_shared_browser()
+                    sync_retry += 1
+                    await asyncio.sleep(2)
+            
+            if sync_success:
                 success_count += 1
+        
         except Exception as e:
             logger.error(f"❌ 批量同步中干员 {name} 失败: {str(e)}", exc_info=True)
-            # 异常后重置page，避免影响下一个
+            # 异常后重置页面，避免影响下一个
             continue
         finally:
-            # 延长等待时间，减少反爬+资源占用
+            # 关键2：增加爬取间隔（延长到3秒，降低浏览器压力）
             if i < len(valid_names):
-                await asyncio.sleep(3)
+                await asyncio.sleep(3)  # 核心：从1.5秒延长到3秒
     
-    # ========== 新增：批量结束后清理资源 ==========
+    # ========== 批量结束后清理资源 ==========
     logger.info(f"===== 批量同步完成，成功: {success_count}/{len(valid_names)} =====")
     await OperatorDetailParser.close_shared_browser()  # 关闭全局浏览器
     db.close()  # 关闭数据库长连接

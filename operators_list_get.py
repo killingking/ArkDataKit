@@ -56,7 +56,7 @@ class OperatorListCrawler:
     def save(self, ops_list: list[dict]):
         """保存干员一览数据到JSON"""
         # 排序规则：稀有度降序（6星在前）→ 中文名升序（拼音排序）
-        ops_list.sort(key=lambda x: (-int(x['rarity']), x['name_cn']))
+        # ops_list.sort(key=lambda x: (-int(x['rarity']), x['name_cn']))
         
         # 构造最终的JSON数据结构
         final_json = {
