@@ -278,10 +278,10 @@ def sync_operators_detail():
 if __name__ == "__main__":
     # 可选执行顺序（按需注释/取消注释）
     # 1. 同步干员一览（批量入库基础信息）
-    # sync_operator_list_to_db()
+    sync_operator_list_to_db()
     
     # 2. 同步静态术语（先于干员详情同步）
-    # sync_terms_to_db()
+    sync_terms_to_db()
 
     # 3. 同步所有干员详情（复用DB连接，优化性能）
     sync_operators_detail()
