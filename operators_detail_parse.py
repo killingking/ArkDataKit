@@ -393,7 +393,13 @@ class OperatorDetailParser:
                     break
 
             return skill
-
+            # ========== 核心逻辑：先找技能X的<p>标签 → 再找对应表格 ==========
+        skill_tables = []
+        # 定位技能区域的根节点（H2），限定查找范围
+        skill_h2 = skill_header.find_parent("h2")
+        if not skill_h2:
+            logger.debug("⚠️  未找到技能H2标题，无法精准匹配技能标签")
+            return skills
         # 遍历查找技能1/2/3的<p>标签（对应精英0/1/2开放）
         for skill_idx in range(1, 4):
             # 匹配关键词：技能1（精英0开放）、技能2（精英1开放）、技能3（精英2开放）
