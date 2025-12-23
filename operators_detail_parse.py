@@ -325,7 +325,7 @@ class OperatorDetailParser:
         return talents
 
     async def parse_skills(self):
-        """解析干员技能（最终稳定版：移除lambda+全量索引防护）"""
+        """解析干员技能（还原你最初的简洁逻辑，只做最小修复）"""
         await self._get_soup()
         skills = []
         skill_header = self.soup.find("span", id="技能")
@@ -334,10 +334,8 @@ class OperatorDetailParser:
             logger.debug("⚠️  未找到技能区域")
             return skills
 
-        # 1. 提取可见文本工具函数（改用clean_text兼容）
+        # 提取可见文本（保持你原来的简洁）
         def extract_visible_text(td_elem) -> str:
-            if not td_elem:
-                return ""
             visible_parts = []
             for child in td_elem.contents:
                 if isinstance(child, str):
@@ -345,19 +343,18 @@ class OperatorDetailParser:
                     if stripped:
                         visible_parts.append(stripped)
                 elif child.name == "span" and "display:none" not in child.get("style", ""):
-                    # 改用clean_text，兼容所有类型
-                    span_text = clean_text(child)
+                    span_text = clean_text(child)  # 只用clean_text兼容
                     if span_text:
                         visible_parts.append(span_text)
             return " ".join(visible_parts)
 
-        # 2. 解析单个技能工具函数（全量索引防护）
+        # 解析单个技能（保持你原来的简洁，只加索引防护）
         def parse_single_skill(table, skill_idx: int) -> dict:
             skill = {
                 "skill_number": skill_idx,
                 "skill_name": "",
                 "skill_type": "",
-                "unlock_condition": f"精英{skill_idx-1}",
+                "unlock_condition": f"精英{skill_idx}",
                 "remark": "",
                 "skill_levels": []
             }
@@ -366,22 +363,17 @@ class OperatorDetailParser:
 
             for idx, row in enumerate(rows):
                 tds = row.find_all("td")
-                # 核心防护：tds为空直接跳过
-                if not tds:
+                if not tds:  # 最小防护：空tds直接跳过
                     continue
 
                 if idx == 0:
-                    # 索引防护：确保tds长度足够
-                    if len(tds) < 2:
-                        logger.debug(f"⚠️  技能表格行{idx}：tds长度不足2，跳过")
-                        continue
-                    # 提取技能名称（全防护）
-                    big_tag = tds[1].find("big")
-                    skill["skill_name"] = clean_text(big_tag) if big_tag else clean_text(tds[1])
-                    # 提取技能类型（索引防护）
+                    # 最小防护：确保索引不越界
+                    if len(tds) >= 2:
+                        big_tag = tds[1].find("big")
+                        skill["skill_name"] = clean_text(big_tag) if big_tag else clean_text(tds[1])
                     if len(tds) >= 3:
                         tooltip_spans = tds[2].find_all("span", class_="mc-tooltips")
-                        skill["skill_type"] = "|".join([clean_text(span) for span in tooltip_spans if span])
+                        skill["skill_type"] = "|".join([clean_text(span) for span in tooltip_spans])
                     continue
 
                 # 提取关键等级（7级和专精3）
@@ -401,77 +393,31 @@ class OperatorDetailParser:
                     is_remark = True
                     continue
                 if is_remark:
-                    skill["remark"] = clean_text(tds[0]) if tds else ""
+                    skill["remark"] = clean_text(tds[0])
                     break
 
-            return skill  
-            
-        # 3. 核心逻辑：移除lambda，手动遍历找表格（兼容所有bs4版本）
+            return skill
+
+        # ========== 还原你最初的写死3次循环（只修1个问题） ==========
+        current_table = skill_header.find_parent("h2").find_next_sibling("table")
         skill_tables = []
-        skill_h2 = skill_header.find_parent("h2")
-        if not skill_h2:
-            logger.debug("⚠️  未找到技能H2标题，无法精准匹配技能标签")
-            return skills
+        for _ in range(3):
+            # 修复：放宽表格class判断（只需要wikitable，不强制nomobile logo）
+            if current_table and "wikitable" in current_table.get("class", []):
+                skill_tables.append(current_table)
+                logger.debug(f"✅ 找到第{len(skill_tables)}个技能表格")
+                # 修复：下一个表格也放宽class判断
+                current_table = current_table.find_next_sibling("table", class_=lambda c: c and "wikitable" in c)
+            else:
+                logger.debug(f"⚠️  未找到第{len(skill_tables)+1}个技能表格")
+                break
 
-        # 遍历查找技能1/2/3的<p>标签
-        for skill_idx in range(1, 4):
-            target_keywords = [
-                f"技能{skill_idx}（精英{skill_idx-1}开放）",
-                f"技能{skill_idx}（精英{skill_idx-1}）",
-                f"技能{skill_idx}"
-            ]
-            
-            # 找<p><b>标签（加日志调试）
-            skill_p_tag = None
-            for p_tag in skill_h2.find_all_next("p"):
-                if p_tag.find_preceding_sibling("h2") != skill_h2:
-                    break
-                b_tag = p_tag.find("b")
-                if not b_tag:
-                    continue
-                b_text = clean_text(b_tag)
-                logger.debug(f"🔍 检测到<p>标签文本：{b_text}")
-                if any(keyword in b_text for keyword in target_keywords):
-                    skill_p_tag = p_tag
-                    logger.debug(f"✅ 找到技能{skill_idx}的<p>标签：{b_text}")
-                    break
-            
-            if not skill_p_tag:
-                logger.debug(f"⚠️  未找到技能{skill_idx}的<p>标签，停止查找")
-                break
-            
-            # 关键修复：移除lambda，手动找wikitable表格
-            skill_table = None
-            # 遍历所有后续表格，手动判断class
-            for tbl in skill_p_tag.find_next_siblings("table"):
-                tbl_classes = tbl.get("class", [])
-                if "wikitable" in tbl_classes:
-                    skill_table = tbl
-                    logger.debug(f"✅ 找到技能{skill_idx}的wikitable表格")
-                    break
-            # 兜底
-            if not skill_table:
-                skill_table = skill_p_tag.find_next_sibling("table")
-            
-            # 表格有效性判断（加日志）
-            if not skill_table:
-                logger.debug(f"⚠️  技能{skill_idx}的<p>标签后无表格，停止查找")
-                break
-            if "wikitable" not in skill_table.get("class", []):
-                logger.debug(f"⚠️  技能{skill_idx}的表格无wikitable类，停止查找")
-                break
-            
-            skill_tables.append(skill_table)
-
-        # 解析技能（加日志）
-        logger.debug(f"📌 找到{len(skill_tables)}个有效技能表格")
+        # 解析技能（保持简洁）
         for idx, table in enumerate(skill_tables, 1):
             skill = parse_single_skill(table, idx)
             if skill["skill_name"]:
                 skills.append(skill)
                 logger.debug(f"✅ 解析技能{idx}：{skill['skill_name']}")
-            else:
-                logger.debug(f"⚠️  技能{idx}解析为空，跳过")
 
         logger.debug(f"📊 解析到技能数量：{len(skills)}")
         return skills
