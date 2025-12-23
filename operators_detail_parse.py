@@ -134,9 +134,9 @@ class OperatorDetailParser:
         return self.soup
 
     async def parse_attrs(self):
-        """解析干员属性（基础属性+额外属性）—— 修复hidden_faction获取问题"""
+        """解析干员属性（基础属性+额外属性）—— 精准适配hidden_faction结构"""
         await self._get_soup()
-        # 初始化基础属性结构（原有逻辑保留）
+        # 初始化基础属性结构（原有逻辑保留，无需修改）
         base_attrs = {
             "elite_0_level_1": {},
             "elite_0_max": {},
@@ -167,52 +167,63 @@ class OperatorDetailParser:
                     if idx < len(key_mapping) and key_mapping[idx]:
                         base_attrs[key_mapping[idx]][attr_key] = val
 
-        # ========== 修复：额外属性解析（重点修改这里） ==========
+        # ========== 重点修复：额外属性解析（适配hidden_faction结构） ==========
         extra_attrs = {}
-        # 1. 增加备选选择器（应对Wiki页面class更新）
-        extra_tbl = self.soup.select_one("table.char-extra-attr-table")
+        # 1. 兼容多种额外属性表格选择器
+        extra_tbl = self.soup.select_one("table.char-extra-attr-table") or self.soup.select_one("table.wikitable.char-extra-attr")
         if not extra_tbl:
-            extra_tbl = self.soup.select_one("table.wikitable.char-extra-attr")  # 备选class
-            if not extra_tbl:
-                logger.warning("⚠️ 未找到额外属性表格，跳过额外属性解析")
-                return {"base_attributes": base_attrs, "extra_attributes": extra_attrs}
+            logger.warning("⚠️ 未找到额外属性表格，跳过额外属性解析")
+            return {"base_attributes": base_attrs, "extra_attributes": extra_attrs}
 
-        # 2. 模糊匹配key（解决“隐藏势力?”带问号的问题）
+        # 2. 自定义工具函数：提取标签内的纯文本（忽略嵌套span/链接）
+        def get_pure_text(elem) -> str:
+            """提取元素内的所有可见文本（合并a标签/过滤span图标）"""
+            if not elem:
+                return ""
+            # 先移除图标类span（避免干扰文本）
+            for span in elem.find_all("span", class_=["mc-tooltips", "mdi"]):
+                span.extract()
+            # 提取所有文本（包括a标签内的文本）
+            text_parts = [text.strip() for text in elem.stripped_strings if text.strip()]
+            return "".join(text_parts)
+
+        # 3. 逐行解析（适配colspan和嵌套标签）
         extra_key_map = {
             "再部署时间": "redployment_time",
             "初始部署费用": "initial_deployment_cost",
             "攻击间隔": "attack_interval",
             "阻挡数": "block_count",
             "所属势力": "faction",
-            "隐藏势力": "hidden_faction"  # 用“包含匹配”替代“精确匹配”
+            "隐藏势力": "hidden_faction"
         }
 
-        # 3. 优化行解析：支持一行1组/2组key-value，不遗漏字段
         for tr in extra_tbl.select("tr"):
-            # 提取单元格文本（过滤空内容）
-            cells = [clean_text(cell).strip() for cell in tr.select("th, td") if clean_text(cell).strip()]
-            if len(cells) < 2:
-                continue  # 跳过无效行
+            ths = tr.select("th")
+            tds = tr.select("td")
+            if not ths or not tds:
+                continue  # 跳过无表头/无内容的行
 
-            # 遍历单元格，按“key-value”对处理（一行可包含1组或2组）
-            for i in range(0, len(cells), 2):
-                if i + 1 >= len(cells):
+            # 提取<th>的纯文本（移除嵌套的span图标）
+            th_text = get_pure_text(ths[0])
+            if not th_text:
+                continue
+
+            # 匹配目标字段（模糊匹配，只要th文本包含key就绑定）
+            matched_field = None
+            for map_key, field in extra_key_map.items():
+                if map_key in th_text:
+                    matched_field = field
                     break
-                raw_key = cells[i]
-                val = cells[i+1]
+            if not matched_field:
+                continue
 
-                # 模糊匹配：只要raw_key包含map_key，就绑定字段（解决“隐藏势力?”的问题）
-                matched_field = None
-                for map_key, field in extra_key_map.items():
-                    if map_key in raw_key:
-                        matched_field = field
-                        break
-                if matched_field:
-                    extra_attrs[matched_field] = val
-                    logger.debug(f"✅ 解析额外属性：{raw_key} → {matched_field} = {val}")
-                else:
-                    logger.debug(f"⏭️  跳过未知额外属性：{raw_key} = {val}")
+            # 提取<td>的纯文本（适配colspan=3的情况）
+            td_text = get_pure_text(tds[0])
+            if td_text:
+                extra_attrs[matched_field] = td_text
+                logger.debug(f"✅ 解析额外属性：{th_text} → {matched_field} = {td_text}")
 
+        logger.debug(f"📋 解析到的额外属性：{extra_attrs}")
         return {"base_attributes": base_attrs, "extra_attributes": extra_attrs}
 
     async def parse_chara(self):
@@ -314,7 +325,7 @@ class OperatorDetailParser:
         return talents
 
     async def parse_skills(self):
-        """解析干员技能（动态适配技能数量，兼容低星干员）"""
+        """解析干员技能（原始写死3次循环版本）"""
         await self._get_soup()
         skills = []
         skill_header = self.soup.find("span", id="技能")
@@ -323,7 +334,7 @@ class OperatorDetailParser:
             logger.debug("⚠️  未找到技能区域")
             return skills
 
-        # 提取可见文本（内部工具函数）
+        # 提取可见文本（原始工具函数）
         def extract_visible_text(td_elem) -> str:
             visible_parts = []
             for child in td_elem.contents:
@@ -337,7 +348,7 @@ class OperatorDetailParser:
                         visible_parts.append(span_text)
             return " ".join(visible_parts)
 
-        # 解析单个技能（内部工具函数）
+        # 解析单个技能（原始逻辑）
         def parse_single_skill(table, skill_idx: int) -> dict:
             skill = {
                 "skill_number": skill_idx,
@@ -358,9 +369,7 @@ class OperatorDetailParser:
                     skill["skill_name"] = clean_text(big_tag) if big_tag else clean_text(tds[1]) if len(tds) > 1 else ""
                     # 提取技能类型
                     tooltip_spans = tds[2].find_all("span", class_="mc-tooltips") if len(tds) > 2 else []
-                    skill["skill_type"] = "|".join(
-                        [clean_text(span) for span in tooltip_spans if clean_text(span)]
-                    )
+                    skill["skill_type"] = "|".join([clean_text(span) for span in tooltip_spans if clean_text(span)])
                     continue
 
                 # 提取关键等级（7级和专精3）
@@ -385,42 +394,58 @@ class OperatorDetailParser:
 
             return skill
 
-        # ========== 核心修改：动态查找技能表格（替代固定循环3次） ==========
-        skill_tables = []
-        # 1. 找到「技能」大标题的父H2节点
-        skill_h2 = skill_header.find_parent("h2")
-        if not skill_h2:
-            logger.debug("⚠️  未找到技能H2标题")
-            return skills
-
-        # 2. 遍历「技能1」「技能2」「技能3」的锚点，动态匹配表格
-        for skill_idx in range(1, 4):  # 最多找3个（游戏内最多3个技能）
-            # 查找「技能X」的锚点span
-            skill_x_anchor = self.soup.find("span", id=f"技能{skill_idx}")
-            if not skill_x_anchor:
-                logger.debug(f"⚠️  未找到「技能{skill_idx}」锚点，停止查找技能表格")
+        # 遍历查找技能1/2/3的<p>标签（对应精英0/1/2开放）
+        for skill_idx in range(1, 4):
+            # 匹配关键词：技能1（精英0开放）、技能2（精英1开放）、技能3（精英2开放）
+            target_keywords = [
+                f"技能{skill_idx}（精英{skill_idx-1}开放）",
+                f"技能{skill_idx}（精英{skill_idx-1}）",  # 兼容无“开放”二字的情况
+                f"技能{skill_idx}"  # 兜底兼容最简写法
+            ]
+            
+            # 在技能H2区域内找包含目标关键词的<p><b>标签
+            skill_p_tag = None
+            for p_tag in skill_h2.find_all_next("p"):
+                # 限定查找范围：不超过下一个H2（避免找到天赋/特性区域）
+                if p_tag.find_preceding_sibling("h2") != skill_h2:
+                    break
+                # 提取<p>标签内的纯文本（只看<b>里的内容）
+                b_tag = p_tag.find("b")
+                if not b_tag:
+                    continue
+                b_text = clean_text(b_tag)
+                # 匹配任意一个关键词
+                if any(keyword in b_text for keyword in target_keywords):
+                    skill_p_tag = p_tag
+                    logger.debug(f"✅ 找到技能{skill_idx}的<p>标签：{b_text}")
+                    break
+            
+            # 没找到技能X的<p>标签 → 停止查找（无标识就不要）
+            if not skill_p_tag:
+                logger.debug(f"⚠️  未找到技能{skill_idx}的<p>标签，停止查找")
                 break
-
-            # 找到锚点对应的表格（锚点的父节点后第一个wikitable表格）
-            skill_x_table = skill_x_anchor.find_parent(["p", "div"]).find_next_sibling("table", class_="wikitable nomobile logo")
-            if not skill_x_table:
-                logger.debug(f"⚠️  未找到「技能{skill_idx}」对应的表格")
-                break
-
-            # 验证表格有效性（包含技能等级相关内容）
-            table_text = skill_x_table.get_text()
-            if "等级" in table_text and "初始SP" in table_text:
-                skill_tables.append(skill_x_table)
-                logger.debug(f"✅ 找到「技能{skill_idx}」对应的表格")
+            
+            # 找到<p>标签后，找其后面的第一个wikitable表格
+            skill_table = skill_p_tag.find_next_sibling("table", class_=lambda c: c and "wikitable" in c)
+            # 兜底：如果找不到带class的，找下一个table
+            if not skill_table:
+                skill_table = skill_p_tag.find_next_sibling("table")
+            
+            # 表格有效则加入列表
+            if skill_table and "wikitable" in skill_table.get("class", []):
+                skill_tables.append(skill_table)
+                logger.debug(f"✅ 找到技能{skill_idx}对应的表格")
             else:
-                logger.debug(f"⚠️  「技能{skill_idx}」的表格无效（无技能等级信息）")
+                logger.debug(f"⚠️  技能{skill_idx}的<p>标签后无有效表格，停止查找")
                 break
-
-        # 批量解析技能（有多少个表格解析多少个）
+        # 解析技能
         for idx, table in enumerate(skill_tables, 1):
-            skills.append(parse_single_skill(table, idx))
+            skill = parse_single_skill(table, idx)
+            if skill["skill_name"]:
+                skills.append(skill)
+                logger.debug(f"✅ 解析技能{idx}：{skill['skill_name']}")
 
-        logger.debug(f"📊 解析到技能数量：{len(skills)}（适配干员实际技能数）")
+        logger.debug(f"📊 解析到技能数量：{len(skills)}")
         return skills
 
     # ========== 关键修改5：优化术语提取，减少资源消耗 ==========
