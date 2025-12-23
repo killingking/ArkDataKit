@@ -325,7 +325,7 @@ class OperatorDetailParser:
         return talents
 
     async def parse_skills(self):
-        """解析干员技能（原始写死3次循环版本）"""
+        """解析干员技能（精准匹配：先找技能X的<p>标签，再找对应表格）"""
         await self._get_soup()
         skills = []
         skill_header = self.soup.find("span", id="技能")
@@ -334,7 +334,7 @@ class OperatorDetailParser:
             logger.debug("⚠️  未找到技能区域")
             return skills
 
-        # 提取可见文本（原始工具函数）
+        # 1. 提取可见文本工具函数（正确缩进在parse_skills内）
         def extract_visible_text(td_elem) -> str:
             visible_parts = []
             for child in td_elem.contents:
@@ -348,13 +348,13 @@ class OperatorDetailParser:
                         visible_parts.append(span_text)
             return " ".join(visible_parts)
 
-        # 解析单个技能（原始逻辑）
+        # 2. 解析单个技能工具函数（正确缩进，函数完整闭合）
         def parse_single_skill(table, skill_idx: int) -> dict:
             skill = {
                 "skill_number": skill_idx,
                 "skill_name": "",
                 "skill_type": "",
-                "unlock_condition": f"精英{skill_idx}",
+                "unlock_condition": f"精英{skill_idx-1}",  # 技能1对应精英0，修正解锁条件
                 "remark": "",
                 "skill_levels": []
             }
@@ -388,18 +388,20 @@ class OperatorDetailParser:
                 if idx == len(rows) - 2 and row.find("th"):
                     is_remark = True
                     continue
-                if is_remark:
+                if is_remark and tds:
                     skill["remark"] = clean_text(tds[0])
                     break
 
-            return skill
-            # ========== 核心逻辑：先找技能X的<p>标签 → 再找对应表格 ==========
+            return skill  # 函数正确闭合，return后无多余代码
+
+        # 3. 核心逻辑：先找技能X的<p>标签 → 再找对应表格（正确缩进在parse_skills内，函数外）
         skill_tables = []
         # 定位技能区域的根节点（H2），限定查找范围
         skill_h2 = skill_header.find_parent("h2")
         if not skill_h2:
             logger.debug("⚠️  未找到技能H2标题，无法精准匹配技能标签")
             return skills
+
         # 遍历查找技能1/2/3的<p>标签（对应精英0/1/2开放）
         for skill_idx in range(1, 4):
             # 匹配关键词：技能1（精英0开放）、技能2（精英1开放）、技能3（精英2开放）
@@ -444,7 +446,8 @@ class OperatorDetailParser:
             else:
                 logger.debug(f"⚠️  技能{skill_idx}的<p>标签后无有效表格，停止查找")
                 break
-        # 解析技能
+
+        # 4. 解析技能（正确缩进）
         for idx, table in enumerate(skill_tables, 1):
             skill = parse_single_skill(table, idx)
             if skill["skill_name"]:
