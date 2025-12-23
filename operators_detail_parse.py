@@ -392,8 +392,8 @@ class OperatorDetailParser:
                     skill["remark"] = clean_text(tds[0])
                     break
 
-            return skill  # 函数正确闭合，return后无多余代码
-
+            return skill  
+            
         # 3. 核心逻辑：先找技能X的<p>标签 → 再找对应表格（正确缩进在parse_skills内，函数外）
         skill_tables = []
         # 定位技能区域的根节点（H2），限定查找范围
