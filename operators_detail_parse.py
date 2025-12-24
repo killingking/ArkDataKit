@@ -9,12 +9,12 @@ from utils import logger, clean_text, clean_desc, clean_filename, ensure_output_
 
 class OperatorDetailParser:
     """干员详情解析器（有状态类封装，维护page/soup）"""
-    # ========== 全局复用的浏览器/上下文（类属性） ==========
+    # ========== 类属性（全局共享） ==========
     _shared_playwright = None
     _shared_browser = None
     _shared_context = None
     _browser_initialized = False
-    _lock = asyncio.Lock()  # 新增：并发锁，避免多实例竞争资源
+    _lock = asyncio.Lock()  # 并发锁，避免多实例竞争资源
 
     # ========== 1. 初始化方法 ==========
     def __init__(self, operator_name: str):
@@ -23,20 +23,20 @@ class OperatorDetailParser:
         self.page = None
         self.soup = None
         
-        # 从配置读取参数
+        # 从配置读取参数（实例属性）
         self.term_min_length = PLAYWRIGHT_CONFIG["term_filter"]["min_length"]
         self.desc_min_length = PLAYWRIGHT_CONFIG["term_filter"]["desc_min_length"]
         self.tooltip_selectors = PLAYWRIGHT_CONFIG["tooltip_selectors"]
         self.wait_times = PLAYWRIGHT_CONFIG["wait_time"]
         self.timeouts = PLAYWRIGHT_CONFIG["timeout"]
         self.browser_args = PLAYWRIGHT_CONFIG["browser_args"]
-        self.headless = PLAYWRIGHT_CONFIG["headless"]
+        self.headless = PLAYWRIGHT_CONFIG["headless"]  # 实例属性，直接读配置
 
-    # ========== 2. 全局浏览器初始化（加锁+属性检查） ==========
+    # ========== 2. 全局浏览器初始化（修复headless+加锁+属性检查） ==========
     @classmethod
     async def init_shared_browser(cls):
         """初始化全局复用的浏览器实例（加锁+状态防护）"""
-        async with cls._lock:  # 关键：并发安全
+        async with cls._lock:  # 并发安全
             if cls._browser_initialized:
                 # 双重检查：对象存在 + 有is_closed方法 + 未关闭
                 context_valid = (
@@ -60,8 +60,9 @@ class OperatorDetailParser:
                     "--max-old-space-size=256",
                     "--memory-pressure-off"
                 ]
+                # 核心修复：直接用配置文件的headless，而非类属性
                 cls._shared_browser = await cls._shared_playwright.chromium.launch(
-                    headless=cls.headless,
+                    headless=PLAYWRIGHT_CONFIG["headless"],  # ✅ 修复点：读配置而非cls.headless
                     args=browser_args,
                     timeout=60000
                 )
@@ -169,7 +170,7 @@ class OperatorDetailParser:
                 self.page = None
                 await asyncio.sleep(3)
 
-    # ========== 以下方法保持不变，仅复制原有代码 ==========
+    # ========== 5. 复用soup对象 ==========
     async def _get_soup(self):
         """内部方法：复用soup对象（避免重复解析页面）"""
         if not self.soup and self.page:
@@ -177,6 +178,7 @@ class OperatorDetailParser:
             self.soup = BeautifulSoup(content, "lxml")
         return self.soup
 
+    # ========== 6. 解析干员属性 ==========
     async def parse_attrs(self):
         """解析干员属性"""
         await self._get_soup()
@@ -247,6 +249,7 @@ class OperatorDetailParser:
             "extra_attributes": extra_attrs
         } 
 
+    # ========== 7. 解析干员特性和分支 ==========
     async def parse_chara(self):
         """解析干员特性和分支"""
         await self._get_soup()
@@ -272,6 +275,7 @@ class OperatorDetailParser:
 
         return result
 
+    # ========== 8. 解析干员天赋 ==========
     async def parse_talents(self):
         """解析干员天赋"""
         await self._get_soup()
@@ -336,6 +340,7 @@ class OperatorDetailParser:
         logger.debug(f"📊 解析到天赋数量：{len(talents)}")
         return talents
 
+    # ========== 9. 解析干员技能（增加容错） ==========
     async def parse_skills(self):
         """解析干员技能"""
         await self._get_soup()
@@ -442,6 +447,7 @@ class OperatorDetailParser:
         logger.debug(f"📊 解析到技能数量：{len(skills)}")
         return skills
 
+    # ========== 10. 解析干员术语（优化资源消耗） ==========
     async def parse_terms(self):
         """解析干员相关术语"""
         await self._get_soup()
@@ -607,6 +613,7 @@ class OperatorDetailParser:
         logger.info(f"\n📊 术语提取完成：总计{total_terms}个有效潜在术语 → 成功{total_success}个 | 失败{total_failed}个 | 去重后{len(unique_terms)}个")
         return unique_terms
 
+    # ========== 11. 整合所有解析结果 ==========
     async def parse_all(self):
         """整合所有解析结果"""
         return {
@@ -628,6 +635,7 @@ class OperatorDetailParser:
             "terms": await self.parse_terms()
         }
 
+    # ========== 12. 保存结果到JSON ==========
     async def save(self, result: dict):
         """保存干员详情到JSON"""
         ensure_output_dir()
@@ -640,6 +648,7 @@ class OperatorDetailParser:
         except IOError as e:
             logger.error(f"❌ 保存文件失败：{str(e)}")
 
+    # ========== 13. 一键执行（优化资源释放） ==========
     async def run(self):
         """一键执行：初始化→解析→保存"""
         if not self.operator_name:
@@ -650,7 +659,7 @@ class OperatorDetailParser:
         try:
             await self._init_browser_page()
             result = await self.parse_all()
-            # await self.save(result)
+            # await self.save(result)  # 如需保存可取消注释
 
             logger.info("\n=== 解析结果汇总 ===")
             logger.info(f"干员名称: {result['operator_name']}")
@@ -674,6 +683,7 @@ class OperatorDetailParser:
                 self.page = None
                 logger.info("🔌 浏览器页面已关闭（浏览器实例复用）")
 
+# 独立执行入口
 if __name__ == "__main__":
     import sys
     operator_name = "焰影苇草" if len(sys.argv) < 2 else sys.argv[1]
