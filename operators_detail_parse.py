@@ -4,159 +4,172 @@ import re
 from datetime import datetime
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from bs4 import BeautifulSoup
-from config import BASE_URL, PLAYWRIGHT_CONFIG, JSON_OUTPUT_DIR  # 补充JSON_OUTPUT_DIR导入
+from config import BASE_URL, PLAYWRIGHT_CONFIG, JSON_OUTPUT_DIR
 from utils import logger, clean_text, clean_desc, clean_filename, ensure_output_dir
 
 class OperatorDetailParser:
     """干员详情解析器（有状态类封装，维护page/soup）"""
-    # ========== 关键修改1：新增全局复用的浏览器/上下文 ==========
+    # ========== 全局复用的浏览器/上下文（类属性） ==========
     _shared_playwright = None
     _shared_browser = None
     _shared_context = None
     _browser_initialized = False
+    _lock = asyncio.Lock()  # 新增：并发锁，避免多实例竞争资源
 
+    # ========== 1. 初始化方法 ==========
+    def __init__(self, operator_name: str):
+        self.operator_name = operator_name.strip()
+        self.url = f"{BASE_URL}/w/{self.operator_name}" if self.operator_name else ""
+        self.page = None
+        self.soup = None
+        
+        # 从配置读取参数
+        self.term_min_length = PLAYWRIGHT_CONFIG["term_filter"]["min_length"]
+        self.desc_min_length = PLAYWRIGHT_CONFIG["term_filter"]["desc_min_length"]
+        self.tooltip_selectors = PLAYWRIGHT_CONFIG["tooltip_selectors"]
+        self.wait_times = PLAYWRIGHT_CONFIG["wait_time"]
+        self.timeouts = PLAYWRIGHT_CONFIG["timeout"]
+        self.browser_args = PLAYWRIGHT_CONFIG["browser_args"]
+        self.headless = PLAYWRIGHT_CONFIG["headless"]
+
+    # ========== 2. 全局浏览器初始化（加锁+属性检查） ==========
     @classmethod
     async def init_shared_browser(cls):
-        """初始化全局复用的浏览器实例（增加状态检查，失效则重启）"""
-        # 核心：检查现有实例是否存活，失效则清理后重建
-        if cls._browser_initialized:
-            # 检查上下文是否存活
-            if cls._shared_context and not cls._shared_context.is_closed():
+        """初始化全局复用的浏览器实例（加锁+状态防护）"""
+        async with cls._lock:  # 关键：并发安全
+            if cls._browser_initialized:
+                # 双重检查：对象存在 + 有is_closed方法 + 未关闭
+                context_valid = (
+                    cls._shared_context 
+                    and hasattr(cls._shared_context, 'is_closed') 
+                    and not cls._shared_context.is_closed()
+                )
+                if context_valid:
+                    return cls._shared_context
+                else:
+                    logger.warning("⚠️ 全局上下文无效，清理后重新初始化")
+                    await cls.close_shared_browser()
+
+            try:
+                cls._shared_playwright = await async_playwright().start()
+                browser_args = PLAYWRIGHT_CONFIG["browser_args"] + [
+                    "--no-sandbox",
+                    "--disable-gpu",
+                    "--disable-dev-shm-usage",
+                    "--disk-cache-dir=/tmp/playwright-cache",
+                    "--max-old-space-size=256",
+                    "--memory-pressure-off"
+                ]
+                cls._shared_browser = await cls._shared_playwright.chromium.launch(
+                    headless=cls.headless,
+                    args=browser_args,
+                    timeout=60000
+                )
+                cls._shared_context = await cls._shared_browser.new_context(
+                    viewport={"width": 1920, "height": 1080},
+                    user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+                cls._browser_initialized = True
+                logger.info("✅ 全局浏览器实例初始化完成（复用模式）")
                 return cls._shared_context
-            else:
-                logger.warning("⚠️ 全局上下文已关闭，清理后重新初始化")
-                await cls.close_shared_browser()  # 清理失效实例
+            except Exception as e:
+                logger.error(f"❌ 全局浏览器初始化失败：{str(e)}")
+                await cls.close_shared_browser()
+                raise
 
-        try:
-            cls._shared_playwright = await async_playwright().start()
-            # 优化浏览器启动参数：禁用沙箱、限制内存、绕过/dev/shm
-            browser_args = PLAYWRIGHT_CONFIG["browser_args"] + [
-                "--no-sandbox",          # 解决小内存服务器崩溃
-                "--disable-gpu",         # 禁用GPU加速
-                "--disable-dev-shm-usage",# 绕过共享内存限制
-                "--disk-cache-dir=/tmp/playwright-cache",  # 指定缓存目录
-                "--max-old-space-size=256",  # 限制Chrome内存（512M）
-                "--memory-pressure-off"  # 关闭内存压力检测
-            ]
-            # 启动浏览器（复用核心）
-            cls._shared_browser = await cls._shared_playwright.chromium.launch(
-                headless=PLAYWRIGHT_CONFIG["headless"],
-                args=browser_args,
-                timeout=60000  # 浏览器启动超时延长到60秒
-            )
-            # 创建复用的上下文
-            cls._shared_context = await cls._shared_browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-            cls._browser_initialized = True
-            logger.info("✅ 全局浏览器实例初始化完成（复用模式）")
-            return cls._shared_context
-        except Exception as e:
-            logger.error(f"❌ 全局浏览器初始化失败：{str(e)}")
-            await cls.close_shared_browser()
-            raise
-
+    # ========== 3. 全局浏览器关闭（加锁+属性检查） ==========
     @classmethod
     async def close_shared_browser(cls):
-        """关闭全局浏览器实例（增加空值/存活检查，避免异常）"""
-        # 先关闭上下文（如果存活）
-        if cls._shared_context and not cls._shared_context.is_closed():
-            try:
-                await cls._shared_context.close()
-            except Exception as e:
-                logger.warning(f"⚠️ 关闭上下文时警告：{str(e)}")
-        cls._shared_context = None
+        """关闭全局浏览器实例（加锁+安全关闭）"""
+        async with cls._lock:
+            # 关闭上下文（检查对象+方法是否存在）
+            if cls._shared_context and hasattr(cls._shared_context, 'is_closed') and not cls._shared_context.is_closed():
+                try:
+                    await cls._shared_context.close()
+                except Exception as e:
+                    logger.warning(f"⚠️ 关闭上下文时警告：{str(e)}")
+            cls._shared_context = None
 
-        # 再关闭浏览器（如果存活）
-        if cls._shared_browser and not cls._shared_browser.is_closed():
-            try:
-                await cls._shared_browser.close()
-            except Exception as e:
-                logger.warning(f"⚠️ 关闭浏览器时警告：{str(e)}")
-        cls._shared_browser = None
+            # 关闭浏览器
+            if cls._shared_browser and hasattr(cls._shared_browser, 'is_closed') and not cls._shared_browser.is_closed():
+                try:
+                    await cls._shared_browser.close()
+                except Exception as e:
+                    logger.warning(f"⚠️ 关闭浏览器时警告：{str(e)}")
+            cls._shared_browser = None
 
-        # 最后停止playwright
-        if cls._shared_playwright:
-            try:
-                await cls._shared_playwright.stop()
-            except Exception as e:
-                logger.warning(f"⚠️ 停止Playwright时警告：{str(e)}")
-        cls._shared_playwright = None
+            # 停止playwright
+            if cls._shared_playwright:
+                try:
+                    await cls._shared_playwright.stop()
+                except Exception as e:
+                    logger.warning(f"⚠️ 停止Playwright时警告：{str(e)}")
+            cls._shared_playwright = None
 
-        cls._browser_initialized = False
-        logger.info("🔌 全局浏览器实例已关闭")
+            cls._browser_initialized = False
+            logger.info("🔌 全局浏览器实例已关闭")
 
+    # ========== 4. 页面初始化（属性检查+异常防护） ==========
     async def _init_browser_page(self):
-        """内部方法：初始化页面（增加上下文存活检查+崩溃重启）"""
+        """内部方法：初始化页面（安全防护）"""
         if not self.operator_name:
             raise ValueError("❌ 干员名称不能为空")
         
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                # 关键1：检查并重建全局上下文（如果失效）
-                context = await self.init_shared_browser()
-                if not context or context.is_closed():
-                    raise Exception("全局上下文已失效")
+                # 初始化上下文（加锁确保安全）
+                async with self._lock:
+                    context = await self.init_shared_browser()
+                    # 检查上下文有效性
+                    context_valid = (
+                        context 
+                        and hasattr(context, 'is_closed') 
+                        and not context.is_closed()
+                    )
+                    if not context_valid:
+                        raise Exception("全局上下文无效")
 
-                # 关键2：创建页面前先关闭旧页面（避免泄漏）
-                if self.page and not self.page.is_closed():
+                # 关闭旧页面（安全检查）
+                if self.page and hasattr(self.page, 'is_closed') and not self.page.is_closed():
                     await self.page.close()
                 self.page = await context.new_page()
                 
-                # 优化超时配置
+                # 超时配置
                 self.page.set_default_timeout(self.timeouts["page_load"] or 60000)
                 self.page.set_default_navigation_timeout(self.timeouts["page_load"] or 60000)
                 
-                # 加载页面：改为wait_until="load"（完全加载）+ 延长超时
+                # 加载页面
                 await self.page.goto(
                     self.url, 
-                    wait_until="load",  # 关键：从domcontentloaded改为load
-                    timeout=60000       # 页面加载超时延长到60秒
+                    wait_until="load",
+                    timeout=60000
                 )
-                # 等待核心内容+网络空闲（解决动态内容加载不全）
                 await self.page.wait_for_selector("#mw-content-text", timeout=60000)
                 await self.page.wait_for_load_state("networkidle")
-                await asyncio.sleep(1)  # 额外等待1秒
+                await asyncio.sleep(1)
                 logger.info(f"✅ 浏览器页面初始化完成：{self.url}")
-                return None  # 不再返回browser（全局复用）
+                return None
                 
             except Exception as e:
                 error_msg = str(e).lower()
-                # 关键3：如果是浏览器/上下文崩溃，强制重启全局浏览器
+                # 处理崩溃场景
                 if "closed" in error_msg or "crashed" in error_msg or "target" in error_msg:
-                    logger.error(f"❌ 浏览器/上下文崩溃，尝试重启（{attempt+1}/{max_retries}）：{str(e)[:50]}")
-                    await self.close_shared_browser()  # 清理失效实例
-                    await asyncio.sleep(5)  # 重启前等待5秒
+                    logger.error(f"❌ 浏览器/上下文异常，尝试重启（{attempt+1}/{max_retries}）：{str(e)[:50]}")
+                    await self.close_shared_browser()
+                    await asyncio.sleep(5)
                 
                 if attempt == max_retries - 1:
                     raise Exception(f"❌ 页面初始化失败，已重试{max_retries}次: {str(e)}")
                 
                 logger.warning(f"⚠️ 页面初始化失败，正在重试 ({attempt + 1}/{max_retries}): {str(e)}")
-                # 失败时关闭当前page，避免泄漏
-                if self.page:
+                # 关闭当前页面
+                if self.page and hasattr(self.page, 'is_closed') and not self.page.is_closed():
                     await self.page.close()
-                    self.page = None
-                await asyncio.sleep(3)  # 重试间隔延长到3秒
+                self.page = None
+                await asyncio.sleep(3)
 
-    def __init__(self, operator_name: str):
-        # 初始化配置和状态
-        self.operator_name = operator_name.strip()
-        self.url = f"{BASE_URL}/w/{self.operator_name}" if self.operator_name else ""
-        self.page = None  # Playwright页面对象（状态）
-        self.soup = None  # BeautifulSoup对象（状态）
-        
-        # 从统一配置读取参数
-        self.term_min_length = PLAYWRIGHT_CONFIG["term_filter"]["min_length"]
-        self.desc_min_length = PLAYWRIGHT_CONFIG["term_filter"]["desc_min_length"]
-        self.tooltip_selectors = PLAYWRIGHT_CONFIG["tooltip_selectors"]
-        self.wait_times = PLAYWRIGHT_CONFIG["wait_time"]
-        self.timeouts = PLAYWRIGHT_CONFIG["timeout"]
-        # 原有browser_args保留（但实际用全局的）
-        self.browser_args = PLAYWRIGHT_CONFIG["browser_args"]
-        self.headless = PLAYWRIGHT_CONFIG["headless"]
-
+    # ========== 以下方法保持不变，仅复制原有代码 ==========
     async def _get_soup(self):
         """内部方法：复用soup对象（避免重复解析页面）"""
         if not self.soup and self.page:
@@ -165,9 +178,8 @@ class OperatorDetailParser:
         return self.soup
 
     async def parse_attrs(self):
-        """解析干员属性"""  # 补全注释错别字
+        """解析干员属性"""
         await self._get_soup()
-        # 初始化基础属性结构
         base_attrs = {
             "elite_0_level_1": {},
             "elite_0_max": {},
@@ -192,7 +204,7 @@ class OperatorDetailParser:
                 "攻击": "atk",
                 "防御": "def",
                 "法术抗性": "res"
-            }  # 调整字典格式，PEP8规范
+            }
             
             for tr in base_tbl.select("tr")[1:]:
                 tds = [clean_text(td) for td in tr.select("th, td")]
@@ -203,11 +215,9 @@ class OperatorDetailParser:
                     if idx < len(key_mapping) and key_mapping[idx]:
                         base_attrs[key_mapping[idx]][attr_key] = val
 
-        # 解析额外属性（修复语法错误+规范格式）
         extra_attrs = {}
         extra_tbl = self.soup.select_one("table.char-extra-attr-table")
         if extra_tbl:
-            # 字段映射移到循环外（避免重复创建，更高效）
             extra_key_map = {
                 "再部署时间": "redployment_time",
                 "初始部署费用": "initial_deployment_cost",
@@ -221,22 +231,22 @@ class OperatorDetailParser:
                 tds = tr.select("td")
                 if not ths or not tds:
                     continue
-                # 修复核心：先定义th_text，再清理引号
-                th_text = clean_text(ths[0])  # 先提取原始文本
-                th_text = th_text.replace('"', '').replace('“', '').replace('”', '').strip()  # 清理引号
+                th_text = clean_text(ths[0])
+                th_text = th_text.replace('"', '').replace('“', '').replace('”', '').strip()
                 td_text = clean_text(tds[0])
                 
                 if th_text in extra_key_map:
                     extra_attrs[extra_key_map[th_text]] = td_text
                     logger.debug(
                         f"✅ 解析额外属性：{th_text} → {extra_key_map[th_text]} = {td_text}"
-                    )  # 长日志换行，符合PEP8
+                    )
 
         logger.debug(f"📋 解析到的额外属性：{extra_attrs}")
         return {
             "base_attributes": base_attrs,
             "extra_attributes": extra_attrs
         } 
+
     async def parse_chara(self):
         """解析干员特性和分支"""
         await self._get_soup()
@@ -249,13 +259,11 @@ class OperatorDetailParser:
         
         if trait_tbl:
             rows = trait_tbl.select("tr")
-            # 解析分支名称和描述
             if len(rows) > 1:
                 tds = rows[1].find_all("td")
                 result["branch_name"] = clean_text(tds[0]) if tds else ""
                 result["branch_description"] = clean_text(tds[1]) if len(tds) > 1 else ""
             
-            # 解析分支详情
             branch_row = trait_tbl.find("tr", string=re.compile("分支信息"))
             if branch_row:
                 next_row = branch_row.find_next_sibling("tr")
@@ -274,7 +282,6 @@ class OperatorDetailParser:
             return talents
 
         def parse_single_talent(table, talent_type: str, span_prefix: str) -> dict:
-            """提取单个天赋（内部工具函数）"""
             talent = {
                 "talent_type": talent_type,
                 "talent_name": "",
@@ -287,28 +294,24 @@ class OperatorDetailParser:
 
             for idx, row in enumerate(rows):
                 if idx == 0:
-                    continue  # 跳过表头
+                    continue
                 tds = row.find_all("td")
                 th = row.find("th")
 
-                # 判断是否为备注行
                 if idx == len(rows) - 2 and th:
                     is_remark_section = True
                     continue
                 if not tds:
                     continue
 
-                # 处理备注
                 if is_remark_section:
                     remark_text = clean_text(tds[0])
                     break
 
-                # 提取天赋名称（仅首次赋值）
                 current_name = clean_text(tds[0])
                 if not talent["talent_name"] and current_name:
                     talent["talent_name"] = current_name
 
-                # 提取天赋详情
                 talent["details"].append({
                     "trigger_condition": clean_text(tds[1]),
                     "description": clean_desc(tds[2].select_one(f"span.{span_prefix}潜能_1")),
@@ -318,14 +321,12 @@ class OperatorDetailParser:
             talent["remarks"] = remark_text
             return talent if talent["talent_name"] and talent["details"] else None
 
-        # 解析第一天赋
         first_talent_tbl = talent_header.find_next("table", class_="wikitable")
         if first_talent_tbl:
             first_talent = parse_single_talent(first_talent_tbl, "第一天赋", "第一天赋")
             if first_talent:
                 talents.append(first_talent)
 
-        # 解析第二天赋
         second_talent_tbl = first_talent_tbl.find_next_sibling("table", class_="wikitable") if first_talent_tbl else None
         if second_talent_tbl:
             second_talent = parse_single_talent(second_talent_tbl, "第二天赋", "第二天赋")
@@ -336,7 +337,7 @@ class OperatorDetailParser:
         return talents
 
     async def parse_skills(self):
-        """解析干员技能（还原你最初的简洁逻辑，只做最小修复）"""
+        """解析干员技能"""
         await self._get_soup()
         skills = []
         skill_header = self.soup.find("span", id="技能")
@@ -345,7 +346,6 @@ class OperatorDetailParser:
             logger.debug("⚠️  未找到技能区域")
             return skills
 
-        # 提取可见文本（保持你原来的简洁）
         def extract_visible_text(td_elem) -> str:
             visible_parts = []
             for child in td_elem.contents:
@@ -354,12 +354,11 @@ class OperatorDetailParser:
                     if stripped:
                         visible_parts.append(stripped)
                 elif child.name == "span" and "display:none" not in child.get("style", ""):
-                    span_text = clean_text(child)  # 只用clean_text兼容
+                    span_text = clean_text(child)
                     if span_text:
                         visible_parts.append(span_text)
             return " ".join(visible_parts)
 
-        # 解析单个技能（保持你原来的简洁，只加索引防护）
         def parse_single_skill(table, skill_idx: int) -> dict:
             skill = {
                 "skill_number": skill_idx,
@@ -374,11 +373,10 @@ class OperatorDetailParser:
 
             for idx, row in enumerate(rows):
                 tds = row.find_all("td")
-                if not tds:  # 最小防护：空tds直接跳过
+                if not tds:
                     continue
 
                 if idx == 0:
-                    # 最小防护：确保索引不越界
                     if len(tds) >= 2:
                         big_tag = tds[1].find("big")
                         skill["skill_name"] = clean_text(big_tag) if big_tag else clean_text(tds[1])
@@ -387,7 +385,6 @@ class OperatorDetailParser:
                         skill["skill_type"] = "|".join([clean_text(span) for span in tooltip_spans])
                     continue
 
-                # 提取关键等级（7级和专精3）
                 if idx == 8 or idx == 11:
                     if len(tds) >= 5:
                         skill["skill_levels"].append({
@@ -399,7 +396,6 @@ class OperatorDetailParser:
                         })
                     continue
 
-                # 识别备注行
                 if idx == len(rows) - 2 and row.find("th"):
                     is_remark = True
                     continue
@@ -409,24 +405,25 @@ class OperatorDetailParser:
 
             return skill
 
-        # ========== 定位技能表格：通过含“技能”的P标签找最多3个技能表 ==========
-        skill_no = skill_header.find_parent("h2").find_next_sibling("p")
+        skill_h2 = skill_header.find_parent("h2")
+        if not skill_h2:
+            logger.debug("⚠️  未找到技能区域的H2标签，跳过技能解析")
+            return skills
+        
+        skill_no = skill_h2.find_next_sibling("p")
         skill_tables = []
 
-        # 循环查找3个技能表格
         for i in range(1, 4):
             if not skill_no:
                 logger.debug(f"⚠️  未找到第{i}个技能表格的锚点P标签，终止查找")
                 break
 
-            # 核心判断：P标签含“技能”才继续找表格（修正：原“精英”改为“技能”）
             if clean_text(skill_no).find("技能") > -1:
                 current_table = skill_no.find_next_sibling("table")
-                # 严格判断表格class：wikitable + nomobile + logo
                 if current_table and all(cls in current_table.get("class", []) for cls in ["wikitable", "nomobile", "logo"]):
                     skill_tables.append(current_table)
                     logger.debug(f"✅ 找到第{i}个技能表格")
-                    skill_no = skill_no.find_next_sibling("p")  # 找下一个P标签
+                    skill_no = skill_no.find_next_sibling("p")
                 else:
                     logger.debug(f"⚠️  第{i}个技能表格class不匹配，跳过")
                     skill_no = skill_no.find_next_sibling("p")
@@ -434,10 +431,8 @@ class OperatorDetailParser:
                 logger.debug(f"⚠️  第{i}个技能表格的P标签不含“技能”，终止查找")
                 break
 
-        # 最终汇总日志
         logger.debug(f"📊 技能表格查找完成：共找到 {len(skill_tables)} 个有效表格")
 
-        # 解析技能（保持简洁）
         for idx, table in enumerate(skill_tables, 1):
             skill = parse_single_skill(table, idx)
             if skill["skill_name"]:
@@ -447,9 +442,8 @@ class OperatorDetailParser:
         logger.debug(f"📊 解析到技能数量：{len(skills)}")
         return skills
 
-    # ========== 关键修改5：优化术语提取，减少资源消耗 ==========
     async def parse_terms(self):
-        """解析干员相关术语（优化：限制数量、提前检测崩溃）"""
+        """解析干员相关术语"""
         await self._get_soup()
         terms = []
         term_seen = set()
@@ -457,13 +451,11 @@ class OperatorDetailParser:
         total_failed = 0
 
         try:
-            # 1. 定位核心内容区
             content_div = self.soup.find("div", id="mw-content-text")
             if not content_div:
                 logger.warning("⚠️  未找到核心内容区，跳过术语提取")
                 return terms
 
-            # 2. 筛选有效术语标签
             term_tags = content_div.find_all(
                 lambda tag: tag.name == "span"
                 and tag.get("class")
@@ -476,31 +468,26 @@ class OperatorDetailParser:
             if total_terms == 0:
                 return terms
 
-            # 3. 检查页面状态，如果页面已崩溃则提前退出
             try:
                 await self.page.evaluate("() => document.title")
             except Exception as e:
-                logger.error("❌ 页面已崩溃，无法进行术语提取")
+                logger.error(f"❌ 页面状态检查失败，跳过术语提取：{str(e)[:50]}")
                 return terms
 
-            # 4. 限制最大处理数量（从50降到20，减少资源消耗）
-            max_terms = min(total_terms, 20)  # 关键：限制最多处理20个
+            max_terms = min(total_terms, 20)
             processed_terms = 0
 
-            # 5. 逐个处理术语
             for idx, term_tag in enumerate(term_tags, 1):
                 if processed_terms >= max_terms:
                     logger.info(f"⏭️ 已达到最大处理数量 {max_terms}，停止处理")
                     break
                     
                 term_name = clean_text(term_tag).strip()
-                # 跳过重复或无效术语
                 if not term_name or term_name in term_seen:
                     logger.info(f"⏭️  术语{idx}/{total_terms}：跳过（重复/无效）→ 名称：{term_name}")
                     continue
 
                 try:
-                    # 3.1 构建CSS定位器
                     class_list = term_tag.get("class", [])
                     valid_classes = [c for c in class_list if "mc-tooltips" in c]
                     if not valid_classes:
@@ -509,24 +496,20 @@ class OperatorDetailParser:
                         continue
 
                     term_class = valid_classes[0]
-                    # 处理特殊字符
                     safe_name = term_name.replace("'", "\\'").replace('"', '\\"').replace("\\", "\\\\")
                     css_selector = f"span.{term_class}:has-text('{safe_name}')"
                     locator = self.page.locator(css_selector).first
 
-                    # 调试：打印匹配数量
                     match_count = await self.page.locator(css_selector).count()
                     if match_count > 1:
                         logger.debug(f"⚠️  术语{term_name}匹配{match_count}个元素，取第一个")
-                        logger.info(f"⚠️  术语{idx}/{total_terms}：定位器匹配{match_count}个元素，已取第一个 → 名称：{term_name}")
+                        logger.info(f"⚠️  术语{idx}/{total_terms}：定位器匹配{match_count}个元素 → 名称：{term_name}")
 
-                    # 3.2 悬浮触发提示框（缩短等待时间）
                     await locator.wait_for(state="visible", timeout=self.timeouts["locator_wait"] or 10000)
                     await locator.scroll_into_view_if_needed()
                     await locator.hover(force=True)
-                    await asyncio.sleep(self.wait_times["tooltip_render"] or 0.5)  # 缩短到0.5秒
+                    await asyncio.sleep(self.wait_times["tooltip_render"] or 0.5)
 
-                    # 3.3 提取提示框内容
                     term_type = "无"
                     term_desc = ""
                     tip_found = False
@@ -535,7 +518,6 @@ class OperatorDetailParser:
                         tip_locator = self.page.locator(tip_selector).first
                         if await tip_locator.count() > 0:
                             tip_found = True
-                            # 提取<strong>内容（术语类型）
                             strong_handles = await tip_locator.locator("strong").all()
                             strong_texts = []
                             for handle in strong_handles:
@@ -544,11 +526,9 @@ class OperatorDetailParser:
                                 if clean_text_val:
                                     strong_texts.append(clean_text_val)
                             term_type = "，".join(strong_texts) if strong_texts else "无"
-                            # 避免类型与名称重复
                             if term_type == term_name:
                                 term_type = "无"
 
-                            # 提取正文（排除strong）
                             content_handles = await tip_locator.locator(":not(strong)").all()
                             content_parts = []
                             for handle in content_handles:
@@ -558,7 +538,6 @@ class OperatorDetailParser:
                                     content_parts.append(clean_text_val)
                             term_desc = "\n".join(content_parts) if content_parts else ""
 
-                            # 正文为空时取完整文本
                             if not term_desc:
                                 full_text = await tip_locator.inner_text(timeout=self.timeouts["text_extract"] or 5000)
                                 if term_type != "无":
@@ -571,14 +550,12 @@ class OperatorDetailParser:
                         total_failed += 1
                         continue
 
-                    # 3.4 过滤无效描述
                     formatted_desc = re.sub(r"\s+", "\n", term_desc).strip()
                     if len(formatted_desc) < self.desc_min_length:
                         logger.info(f"⏭️  术语{idx}/{total_terms}：跳过（描述过短）→ 名称：{term_name}")
                         total_failed += 1
                         continue
 
-                    # 3.5 加入结果（去重）
                     if term_name not in term_seen:
                         terms.append({
                             "term_name": term_name,
@@ -591,10 +568,9 @@ class OperatorDetailParser:
 
                     processed_terms += 1
 
-                    # 3.6 清理状态（简化，减少资源占用）
                     try:
                         await self.page.mouse.move(100, 100)
-                        await asyncio.sleep(0.1)  # 缩短到0.1秒
+                        await asyncio.sleep(0.1)
                     except Exception as e:
                         logger.warning(f"⚠️ 鼠标移动失败，继续下一个术语: {str(e)[:30]}")
 
@@ -612,7 +588,7 @@ class OperatorDetailParser:
                     error_msg = str(e).lower()
                     if "crashed" in error_msg or "target crashed" in error_msg:
                         logger.error(f"❌ 页面崩溃，停止术语提取：{str(e)[:50]}")
-                        break  # 页面崩溃时立即退出
+                        break
                     logger.info(f"❌ 术语{idx}/{total_terms}：失败（未知错误）→ 名称：{term_name} | 错误：{str(e)[:50]}")
                     total_failed += 1
                     processed_terms += 1
@@ -621,7 +597,6 @@ class OperatorDetailParser:
         except Exception as e:
             logger.error(f"❌ 术语提取主流程错误：{str(e)}")
 
-        # 最终去重（双重保障）
         unique_terms = []
         final_seen = set()
         for term in terms:
@@ -629,7 +604,6 @@ class OperatorDetailParser:
                 final_seen.add(term["term_name"])
                 unique_terms.append(term)
 
-        # 打印统计报告
         logger.info(f"\n📊 术语提取完成：总计{total_terms}个有效潜在术语 → 成功{total_success}个 | 失败{total_failed}个 | 去重后{len(unique_terms)}个")
         return unique_terms
 
@@ -666,23 +640,18 @@ class OperatorDetailParser:
         except IOError as e:
             logger.error(f"❌ 保存文件失败：{str(e)}")
 
-    # ========== 关键修改6：重构run方法，优化资源释放 ==========
     async def run(self):
-        """一键执行：初始化→解析→保存（优化资源释放）"""
+        """一键执行：初始化→解析→保存"""
         if not self.operator_name:
             logger.error("❌ 干员名称为空，无法解析")
             return None
 
         logger.info(f"=== 开始爬取干员: {self.operator_name} ({self.url}) ===")
         try:
-            # 初始化页面（复用全局浏览器）
             await self._init_browser_page()
-            # 执行解析
             result = await self.parse_all()
-            # 保存结果（注释保留）
             # await self.save(result)
 
-            # 打印调试信息
             logger.info("\n=== 解析结果汇总 ===")
             logger.info(f"干员名称: {result['operator_name']}")
             logger.info(f"分支名称: {result['characteristic']['branch_name']}")
@@ -699,17 +668,16 @@ class OperatorDetailParser:
             logger.error(f"❌ 解析错误：{str(e)[:100]}")
             return None
         finally:
-            # ========== 关键：只关闭page，不关闭browser（全局复用） ==========
-            if self.page:
+            # 安全关闭页面
+            if self.page and hasattr(self.page, 'is_closed') and not self.page.is_closed():
                 await self.page.close()
                 self.page = None
                 logger.info("🔌 浏览器页面已关闭（浏览器实例复用）")
 
-# 保留独立执行入口（方便单独调试）
 if __name__ == "__main__":
     import sys
     operator_name = "焰影苇草" if len(sys.argv) < 2 else sys.argv[1]
-    # 独立运行时手动管理全局浏览器
+    
     async def main():
         try:
             parser = OperatorDetailParser(operator_name)
